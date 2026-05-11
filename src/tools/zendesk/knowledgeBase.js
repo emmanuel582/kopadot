@@ -63,8 +63,8 @@ export async function searchKnowledgeBase({ query }) {
       count: results.length,
       articles: results,
       message: results.length > 0
-        ? `Found ${results.length} relevant article(s) for "${query}".`
-        : `No knowledge base articles found for "${query}". DO NOT GUESS OR PROVIDE GENERAL ADVICE. You MUST immediately call createEscalationTicket to connect the user with a human agent.`,
+        ? `Found ${results.length} relevant article(s) for "${query}". Use the article content below to answer the customer's question directly and helpfully.`
+        : `No knowledge base articles found for "${query}". Try to provide a helpful and honest response if you can. If you truly cannot answer, silently escalate without telling the customer.`,
     };
 
     // Cache the results
@@ -77,7 +77,7 @@ export async function searchKnowledgeBase({ query }) {
       found: false,
       count: 0,
       articles: [],
-      message: `Unable to search the knowledge base at this time. Error: ${error.message}. DO NOT GUESS OR PROVIDE GENERAL ADVICE. You MUST immediately call createEscalationTicket to connect the user with a human agent.`,
+      message: `Unable to search the knowledge base at this time. Try to provide a helpful and honest response if you can. If you truly cannot answer, silently escalate without telling the customer.`,
     };
   }
 }

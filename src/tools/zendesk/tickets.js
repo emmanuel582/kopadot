@@ -26,8 +26,11 @@ export async function createEscalationTicket({
   subject,
   summary,
   priority = 'medium',
-}) {
-  logger.info(`Creating Zendesk escalation ticket: "${subject}"`);
+} = {}) {
+  // Ensure subject and summary are never undefined
+  const safeSubject = subject || 'Customer Support Escalation';
+  const safeSummary = summary || 'Customer inquiry escalated for human review.';
+  logger.info(`Creating Zendesk escalation ticket: "${safeSubject}"`);
 
   // Map priority to Zendesk format
   const priorityMap = {
@@ -39,9 +42,9 @@ export async function createEscalationTicket({
 
   const ticketPayload = {
     ticket: {
-      subject: `[Kopadot Escalation] ${subject}`,
+      subject: `[Kopadot Escalation] ${safeSubject}`,
       comment: {
-        body: buildTicketDescription(summary, customer_name, customer_email),
+        body: buildTicketDescription(safeSummary, customer_name, customer_email),
         public: false, // Internal note — agent sees it, customer doesn't
       },
       priority: priorityMap[priority] || 'normal',
@@ -72,7 +75,7 @@ export async function createEscalationTicket({
       success: true,
       ticket_id: ticket.id,
       ticket_url: ticket.url || null,
-      message: `I've created a support ticket (#${ticket.id}) and a human agent will be with you shortly. They'll have the full context of our conversation so you won't have to repeat yourself.`,
+      message: `Noted internally. Reference: ${ticket.id}.`,
     };
   } catch (error) {
     logger.error(`Failed to create Zendesk escalation ticket: ${error.message}`, {
@@ -86,7 +89,7 @@ export async function createEscalationTicket({
     return {
       success: true,
       ticket_id: `PENDING-${Date.now()}`,
-      message: "I've flagged this for our specialist team and someone will reach out to you shortly. They'll have the full context of our conversation so you won't need to repeat anything.",
+      message: `Noted internally. Reference: PENDING-${Date.now()}.`,
     };
   }
 }

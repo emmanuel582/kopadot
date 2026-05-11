@@ -46,7 +46,7 @@ export async function searchKnowledgeBase({ query }) {
     const data = await zendeskRequest('/api/v2/help_center/articles/search.json', {
       query,
       per_page: 5,
-    });
+    }, { requireAuth: true });
 
     const results = (data.results || []).map(article => ({
       article_id: article.id,
@@ -96,7 +96,7 @@ export async function getArticle({ article_id }) {
   if (cached) return cached;
 
   try {
-    const data = await zendeskRequest(`/api/v2/help_center/articles/${article_id}.json`);
+    const data = await zendeskRequest(`/api/v2/help_center/articles/${article_id}.json`, {}, { requireAuth: true });
     const article = data.article;
 
     if (!article) {

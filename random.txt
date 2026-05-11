@@ -1,0 +1,158 @@
+PS C:\KopaDot> node C:\KopaDot\scripts\test-production.js
+🚀 KopaDot Production Test Suite
+
+   Target: http://localhost:3000/api/chat
+   Retries per scenario: 3
+   Inter-scenario delay: 2500ms
+
+⚠️  Zendesk question fetch failed: fetch failed
+
+── Scenario 1/7 ──
+   Prompt: Hi, can you look up order 29828903? I want to know its current status and what items are in it....
+   ✅ Status: 200 | Tools: [lookupOrderById] | 3241ms | Attempt 1
+   Reply: Thank you for providing the order ID!
+
+Here are the details for order **29828903**:
+
+*   **Current Status:** FBA Sent
+* ...
+
+── Scenario 2/7 ──
+   Prompt: Please track order 29830694. Has it been shipped? What courier was used?...
+   ✅ Status: 200 | Tools: [trackShipment] | 6051ms | Attempt 1
+   Reply: Your order 29830694 has not been shipped yet. The current status is "Status code: 0". The tracking number is UK388403041...
+
+── Scenario 3/7 ──
+   Prompt: I think I was charged twice for order 29825600. Please check the payment history and tell me what ha...
+   ✅ Status: 200 | Tools: [getPaymentHistory] | 5105ms | Attempt 1
+   Reply: It looks like only one payment record was found for your order #29825600, and the total amount paid is showing as 0 EUR....
+
+── Scenario 4/7 ──
+   Prompt: I want the price and stock availability for product 362741125....
+   ✅ Status: 200 | Tools: [getProductInfo] | 4600ms | Attempt 1
+   Reply: Thank you for your inquiry!
+
+The Motorola Moto Edge 40 Neo 256GB 12GB Dual SIM Black Smartphone (Product ID: 362741125) ...    
+
+── Scenario 5/7 ──
+   Prompt: Do you have any Motorola phones in stock? I am looking for a Moto G84....
+   ✅ Status: 200 | Tools: [searchProducts] | 7465ms | Attempt 1
+   Reply: I checked for the Moto G84, and unfortunately, it is currently out of stock.
+
+Would you like me to check for other Motor...
+
+── Scenario 6/7 ──
+   Prompt: Can you check order 29941843 and cancel it if it has not been shipped yet?...
+   ✅ Status: 200 | Tools: [lookupOrderById] | 3714ms | Attempt 1
+   Reply: I'm sorry, but it looks like order **29941843** has already been shipped with the status "FBA Sent". This means I'm unab...
+
+── Scenario 7/7 ──
+   Prompt: Is product 362741132 currently in stock? How many units do you have?...
+   ✅ Status: 200 | Tools: [checkStock] | 3030ms | Attempt 1
+   Reply: I'm sorry, but the Motorola Moto G35 Grey 4+128GB (ID: 362741132) is currently out of stock. We do not have any units av...
+
+═══════════════════════════════════════════
+{
+  "baseUrl": "http://localhost:3000",
+  "chatUrl": "http://localhost:3000/api/chat",
+  "retries": 3,
+  "usedZendeskQuestions": false,
+  "results": [
+    {
+      "scenario": 1,
+      "prompt": "Hi, can you look up order 29828903? I want to know its current status and what items are in it.",
+      "sessionId": "prod-test-1777372858313-1",
+      "httpStatus": 200,
+      "attemptUsed": 1,
+      "latencyMs": 3241,
+      "toolsUsed": [
+        "lookupOrderById"
+      ],
+      "isFallback": false,
+      "replyPreview": "Thank you for providing the order ID!\n\nHere are the details for order **29828903**:\n\n*   **Current Status:** FBA Sent\n*   **Items:**\n    *   1 x Samsung GALAXY S24 + 12/256 BLACK\n\nIs there anything else I can help you with regarding this order?"
+    },
+    {
+      "scenario": 2,
+      "prompt": "Please track order 29830694. Has it been shipped? What courier was used?",       
+      "sessionId": "prod-test-1777372861558-2",
+      "httpStatus": 200,
+      "attemptUsed": 1,
+      "latencyMs": 6051,
+      "toolsUsed": [
+        "trackShipment"
+      ],
+      "isFallback": false,
+      "replyPreview": "Your order 29830694 has not been shipped yet. The current status is \"Status code: 0\". The tracking number is UK3884030417, and the courier is listed as \"other\". There is no tracking URL available at this moment.\n\nWould you like me to check anything e"
+    },
+    {
+      "scenario": 3,
+      "prompt": "I think I was charged twice for order 29825600. Please check the payment history and tell me what happened.",
+      "sessionId": "prod-test-1777372870112-3",
+      "httpStatus": 200,
+      "attemptUsed": 1,
+      "latencyMs": 5105,
+      "toolsUsed": [
+        "getPaymentHistory"
+      ],
+      "isFallback": false,
+      "replyPreview": "It looks like only one payment record was found for your order #29825600, and the total amount paid is showing as 0 EUR. The payment record itself also shows an amount of 0 EUR.\n\nThis suggests that the payment might not have gone through successfully"
+    },
+    {
+      "scenario": 4,
+      "prompt": "I want the price and stock availability for product 362741125.",
+      "sessionId": "prod-test-1777372877731-4",
+      "httpStatus": 200,
+      "attemptUsed": 1,
+      "latencyMs": 4600,
+      "toolsUsed": [
+        "getProductInfo"
+      ],
+      "isFallback": false,
+      "replyPreview": "Thank you for your inquiry!\n\nThe Motorola Moto Edge 40 Neo 256GB 12GB Dual SIM Black Smartphone (Product ID: 362741125) is priced at **219 EUR**.\n\nUnfortunately, this item is currently **out of stock**."
+    },
+    {
+      "scenario": 5,
+      "prompt": "Do you have any Motorola phones in stock? I am looking for a Moto G84.",
+      "sessionId": "prod-test-1777372884841-5",
+      "httpStatus": 200,
+      "attemptUsed": 1,
+      "latencyMs": 7465,
+      "toolsUsed": [
+        "searchProducts"
+      ],
+      "isFallback": false,
+      "replyPreview": "I checked for the Moto G84, and unfortunately, it is currently out of stock.\n\nWould you like me to check for other Motorola phone models, or perhaps a different brand?"   
+    },
+    {
+      "scenario": 6,
+      "prompt": "Can you check order 29941843 and cancel it if it has not been shipped yet?",     
+      "sessionId": "prod-test-1777372894813-6",
+      "httpStatus": 200,
+      "attemptUsed": 1,
+      "latencyMs": 3714,
+      "toolsUsed": [
+        "lookupOrderById"
+      ],
+      "isFallback": false,
+      "replyPreview": "I'm sorry, but it looks like order **29941843** has already been shipped with the status \"FBA Sent\". This means I'm unable to cancel it at this point.\n\nWould you like me to help you initiate a return for the order once you receive it?"
+    },
+    {
+      "scenario": 7,
+      "prompt": "Is product 362741132 currently in stock? How many units do you have?",
+      "sessionId": "prod-test-1777372901037-7",
+      "httpStatus": 200,
+      "attemptUsed": 1,
+      "latencyMs": 3030,
+      "toolsUsed": [
+        "checkStock"
+      ],
+      "isFallback": false,
+      "replyPreview": "I'm sorry, but the Motorola Moto G35 Grey 4+128GB (ID: 362741132) is currently out of stock. We do not have any units available at the moment."
+    }
+  ],
+  "zendeskError": "fetch failed"
+}
+═══════════════════════════════════════════
+
+✅ Result: 7/7 scenarios passed (100%)
+PS C:\Kop please fix hr znedesk soemthing and try t query znedesk upn the knowledge abse and all 

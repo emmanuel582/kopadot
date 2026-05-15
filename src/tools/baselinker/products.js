@@ -92,26 +92,6 @@ export async function searchProducts({ query, category_id }) {
     const productEntries = Object.entries(productsObj);
 
     if (productEntries.length === 0) {
-      // Try alternative filter parameters
-      try {
-        const altParams = {
-          inventory_id: inventoryId,
-          filter_text: query,
-          page: 1,
-        };
-        if (category_id) altParams.filter_category_id = parseInt(category_id, 10);
-
-        const altData = await baselinkerRequest('getInventoryProductsList', altParams);
-        const altProducts = altData.products || {};
-        const altEntries = Object.entries(altProducts);
-
-        if (altEntries.length > 0) {
-          return formatProductSearchResults(altEntries, query);
-        }
-      } catch (altError) {
-        logger.debug(`Alternative product search also failed: ${altError.message}`);
-      }
-
       return {
         found: false,
         count: 0,

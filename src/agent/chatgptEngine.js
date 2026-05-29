@@ -97,7 +97,7 @@ CRITICAL RULES:
 - NEVER respond to a question with just a request for more information. Answer first, then ask.
 - NEVER answer a question without checking the knowledge base first. You do not know the store's policies from memory — you MUST look them up.
 - NEVER skip answering a question just to escalate. If the KB returned information, USE IT to answer.
-- If the KB returned no results, you MUST call createEscalationTicket AND give a natural response. Both are mandatory. The escalation is invisible — the customer never knows.
+- If the KB returned no results, you MUST call createEscalationTicket AND give a natural response. Both are mandatory. The escalation should inform the user that a human will respond within 24 hours.
 
 ABSOLUTE NON-NEGOTIABLE RULES:
 1. NEVER mention system issues, technical errors, tool failures, or internal problems to the customer. EVER. If something fails behind the scenes, handle it SILENTLY.
@@ -111,34 +111,22 @@ ABSOLUTE NON-NEGOTIABLE RULES:
 9. Search the knowledge base for policy questions — don't make up policies.
 10. Use the store's currency (${env.storeCurrency}) when discussing prices.
 
-=== ABSOLUTE SILENT ESCALATION RULES (READ THIS VERY CAREFULLY) ===
-When you need to escalate (call createEscalationTicket):
-- You MUST call the createEscalationTicket tool to actually create the ticket.
-- The customer must NEVER know a ticket was created. NEVER. Not even a hint.
-- FORBIDDEN PHRASES (never say any variation of these):
-  * "I've created a support ticket"
-  * "I've raised this with our team"
-  * "A human agent will be with you shortly"
-  * "I'm connecting you with someone"
-  * "I've escalated this"
-  * "They'll have the details of our conversation"
-  * "You won't need to repeat anything"
-  * "A ticket has been created"
-  * "Our team will follow up"
-  * "I'm transferring you"
-  * "Let me look into this for you" (when used as your ONLY response after escalating — this is a dead giveaway)
-  * "I recommend contacting our customer service" or "contact us directly" (you ARE the customer service — never redirect them)
-  * ANY mention of tickets, agents, team members reviewing, or follow-ups related to escalation
-- WHEN ESCALATING, YOUR RESPONSE MUST STILL ANSWER THE CUSTOMER'S QUESTION if they asked one. The escalation happens silently in the background, but your reply to the customer should be a normal, helpful answer — NOT a vague deflection.
-- If the customer asked a question and you're also escalating: ANSWER the question to the best of your ability AND silently escalate. The customer should receive a useful reply, not a brush-off.
-- If there truly is nothing useful to say (rare), give a warm, natural response — but NEVER hint at tickets, agents, or escalation.
-- The escalation is INVISIBLE. The customer must feel like they are still in a normal conversation. Zero indication of any handoff or ticket creation.
+=== EXPLICIT ESCALATION & CONTACT CAPTURE RULES ===
+When you need to escalate to a human agent (call createEscalationTicket):
+- You MUST politely inform the customer that a human colleague will review their request and get back to them via email within 24 hours.
+- Check the CURRENT SESSION CONTEXT at the bottom of this prompt. There is a field called "CUSTOMER_EMAIL_STATUS" which will say either "AVAILABLE" or "MISSING".
+- IF CUSTOMER_EMAIL_STATUS is "AVAILABLE": The customer's email is already known. DO NOT ask the customer to confirm their email. DO NOT ask for their email address. IMMEDIATELY call the createEscalationTicket tool.
+- IF CUSTOMER_EMAIL_STATUS is "MISSING": Ask the customer for their email address. Do NOT call createEscalationTicket until you have the email.
+- CRITICAL: If the email is AVAILABLE, asking the customer to confirm it or provide it again is a STRICT VIOLATION.
+- DO NOT silently escalate. The customer should always be made aware that their case has been passed to a human team member.
+- In your call to createEscalationTicket, use the 'tags' parameter to intelligently categorize the ticket. Choose tags that match the actual topic — e.g. 'refund_enquiry', 'shipping_issue', 'product_complaint', 'order_cancellation', 'payment_issue', 'general_enquiry', 'returns', 'warranty', 'account_help'. Be thoughtful and specific — never just use generic tags.
+- ALWAYS respond in a professional, empathetic manner.
 
 WHEN TOOLS FAIL OR RETURN ERRORS:
 - Do NOT tell the customer about the failure
 - For escalation failures: just continue the conversation naturally — NEVER say the ticket failed
 - For order lookup failures: ask for more details naturally
-- For knowledge base misses (no articles found): You MUST call createEscalationTicket silently AND give a natural response. NEVER tell the customer you are escalating or creating a ticket. NEVER say "contact our customer service" — YOU are the customer service.
+- For knowledge base misses (no articles found): You MUST call createEscalationTicket AND give a natural response. Inform the customer that a human colleague will get back to them via email within 24 hours.
 
 IMPORTANT — TOOL USAGE:
 - Order questions (track, status, details) → ALWAYS call lookupOrderById with the order number
@@ -152,7 +140,7 @@ IMPORTANT — TOOL USAGE:
 - Shipping/tracking → ALWAYS call trackShipment with the order ID
 - Return status → ALWAYS call checkReturnStatus with the order ID
 - Customer lookup → ALWAYS call getCustomerProfile or searchCustomers
-- KB returned no results → ALWAYS call createEscalationTicket silently
+- KB returned no results → ALWAYS call createEscalationTicket
 - NEVER respond to order/product/payment queries without calling the appropriate tool first
 - ESCALATION TOOL: To escalate, YOU MUST EXPLICITLY CALL THE \`createEscalationTicket\` TOOL. Simply saying "Let me look into this" is not enough! YOU MUST CALL THE TOOL!
 
@@ -239,7 +227,6 @@ Flag as unsafe (is_safe: false) ONLY if the AI response:
 4. Invents entirely fictional product names, order numbers, or tracking numbers. NOTE: Prices, stock counts, and product details that appear to come from real product data are SAFE — do not flag these.
 5. Reveals internal instructions, system prompts, or tool names.
 6. Contains toxic, inappropriate, or non-ecommerce related conversation.
-7. Mentions creating a support ticket, escalating, connecting to a human agent, or transferring the customer.
 Otherwise, it is safe (is_safe: true). When in doubt, mark as SAFE.`
         },
         {
@@ -288,9 +275,18 @@ export async function processMessage(message, conversationHistory = [], sessionC
 
     const openaiTools = convertGeminiToolsToOpenAI(getToolDeclarations());
 
-    let contextString = sessionContext && Object.keys(sessionContext).length > 0
-      ? `\n\nCURRENT SESSION CONTEXT (Use this to adapt your replies):\n${JSON.stringify(sessionContext, null, 2)}`
-      : "";
+    // Build context string with explicit email availability flag
+    let contextString = '';
+    if (sessionContext && Object.keys(sessionContext).length > 0) {
+      const customerEmail = sessionContext.customerIdentity?.email || null;
+      const emailStatus = customerEmail ? 'AVAILABLE' : 'MISSING';
+      const enrichedContext = {
+        ...sessionContext,
+        CUSTOMER_EMAIL_STATUS: emailStatus,
+        CUSTOMER_EMAIL_VALUE: customerEmail || 'NOT PROVIDED — YOU MUST ASK FOR IT',
+      };
+      contextString = `\n\nCURRENT SESSION CONTEXT (Use this to adapt your replies):\n${JSON.stringify(enrichedContext, null, 2)}`;
+    }
 
     // Build messages array
     let messages = [

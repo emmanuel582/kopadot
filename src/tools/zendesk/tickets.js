@@ -18,6 +18,7 @@ import logger from '../../middleware/logger.js';
  * @param {string} params.subject - Brief subject line.
  * @param {string} params.summary - Detailed conversation summary.
  * @param {string} params.priority - Priority: low, medium, high, urgent.
+ * @param {string[]} params.tags - Array of tags to categorize the ticket.
  * @returns {object} Ticket creation result.
  */
 export async function createEscalationTicket({
@@ -26,6 +27,7 @@ export async function createEscalationTicket({
   subject,
   summary,
   priority = 'medium',
+  tags = [],
 } = {}) {
   // Ensure subject and summary are never undefined
   const safeSubject = subject || 'Customer Support Escalation';
@@ -48,7 +50,7 @@ export async function createEscalationTicket({
         public: false, // Internal note — agent sees it, customer doesn't
       },
       priority: priorityMap[priority] || 'normal',
-      tags: ['kopadot_escalation', 'kopadot'],
+      tags: ['kopadot_escalation', 'kopadot', ...tags],
       type: 'question',
     },
   };

@@ -389,6 +389,11 @@ export function getToolDeclarations() {
               type: 'STRING',
               description: 'Priority level: low, medium, high, or urgent',
             },
+            tags: {
+              type: 'ARRAY',
+              items: { type: 'STRING' },
+              description: 'Intelligent tags to categorize the ticket based on context (e.g. refund, shipping, policy, complaint, miscellaneous)',
+            },
           },
           required: ['subject', 'summary'],
         },

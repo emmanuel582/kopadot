@@ -134,8 +134,21 @@ async function handleConversationMessage(event, fullPayload) {
   // Extract customer info
   const author = message.author || {};
   const user = payload.user || author.user || {};
-  const customerName = user.name || user.givenName || author.displayName || null;
-  const customerEmail = user.email || null;
+  let customerName = user.name || user.givenName || author.displayName || null;
+  let customerEmail = user.email || null;
+
+  // If email is missing from the payload, attempt to fetch it directly from Sunshine Conversations profile
+  const sunshineUserId = author.userId || author.appUserId;
+  if (!customerEmail && sunshineUserId) {
+    try {
+      customerEmail = await fetchSunshineUserEmail(sunshineUserId);
+      if (customerEmail) {
+        logger.debug(`Successfully fetched missing email ${customerEmail} for Sunshine user ${sunshineUserId}`);
+      }
+    } catch (err) {
+      logger.warn(`Failed to fetch email for Sunshine user ${sunshineUserId}: ${err.message}`);
+    }
+  }
 
   logger.info(`Zendesk message received: "${messageText.slice(0, 100)}"`, {
     conversationId,
@@ -328,5 +341,22 @@ router.get('/status', (req, res) => {
     },
   });
 });
+
+/**
+ * Fetch a user profile from Sunshine Conversations to get their email if missing from the webhook.
+ */
+async function fetchSunshineUserEmail(userId) {
+  if (!env.sunshineAppId || !env.sunshineKeyId || !env.sunshineKeySecret) return null;
+
+  const url = `https://${env.zendeskSubdomain}.zendesk.com/sc/v2/apps/${env.sunshineAppId}/users/${userId}`;
+  const auth = Buffer.from(`${env.sunshineKeyId}:${env.sunshineKeySecret}`).toString('base64');
+
+  const response = await axios.get(url, {
+    headers: { Authorization: `Basic ${auth}` },
+    timeout: 5000,
+  });
+
+  return response.data?.user?.profile?.email || null;
+}
 
 export default router;

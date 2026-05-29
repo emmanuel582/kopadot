@@ -11,6 +11,7 @@ import webhookRouter from './channels/webhook.js';
 import zendeskRouter from './channels/zendesk.js';
 import { attachLiveChat } from './channels/livechat.js';
 import { getSessionStats } from './agent/conversationMgr.js';
+import { startEmailPolling } from './channels/email.js';
 
 /**
  * KopaDot — AI E-Commerce Support Agent
@@ -77,6 +78,13 @@ const server = createServer(app);
 
 // Attach WebSocket live chat
 attachLiveChat(server);
+
+// Start polling for Microsoft 365 emails
+if (env.msGraphTenantId && env.msGraphClientId) {
+  startEmailPolling();
+} else {
+  logger.info('Microsoft 365 Email Polling disabled (missing credentials).');
+}
 
 server.listen(env.port, () => {
   logger.info(`

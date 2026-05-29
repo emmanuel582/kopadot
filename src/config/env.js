@@ -38,6 +38,11 @@ const env = {
   sunshineKeySecret: process.env.SUNSHINE_KEY_SECRET || null,
   zendeskWebhookSecret: process.env.ZENDESK_WEBHOOK_SECRET || null,
 
+  // Microsoft 365 / Graph API
+  msGraphTenantId: process.env.MS_GRAPH_TENANT_ID,
+  msGraphClientId: process.env.MS_GRAPH_CLIENT_ID,
+  msGraphClientSecret: process.env.MS_GRAPH_CLIENT_SECRET,
+  msGraphUserId: process.env.MS_GRAPH_USER_ID,
 
   // Store
   storeName: process.env.STORE_NAME || 'Our Store',

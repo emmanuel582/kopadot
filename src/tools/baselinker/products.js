@@ -59,10 +59,10 @@ export async function getProductInfo({ product_id }) {
 
 /**
  * Search the product catalog by name or keywords.
- * @param {object} params - { query: string, category_id?: string }
+ * @param {object} params - { query: string, category_id?: string, required_features?: string[], max_price?: number, in_stock_only?: boolean }
  * @returns {object} Matching products.
  */
-export async function searchProducts({ query, category_id }) {
+export async function searchProducts({ query, category_id, required_features = [], max_price, in_stock_only }) {
   logger.info(`Searching products: "${query}"${category_id ? ` in category ${category_id}` : ''}`);
   const inventoryId = env.baselinkerInventoryId;
 
@@ -89,13 +89,42 @@ export async function searchProducts({ query, category_id }) {
 
     // BaseLinker returns products as an OBJECT { "id": {...}, "id2": {...} }
     const productsObj = data.products || {};
-    const productEntries = Object.entries(productsObj);
+    let productEntries = Object.entries(productsObj);
+
+    // Apply smart in-memory filtering
+    productEntries = productEntries.filter(([pid, p]) => {
+      const name = extractProductName(p).toLowerCase();
+      // Description is often in text_fields or description field
+      const desc = (p.description || p.text_fields?.description || '').toLowerCase();
+      const price = extractProductPrice(p);
+      const stock = calculateTotalStock(p);
+
+      // 1. Price Filter
+      if (max_price !== undefined && max_price !== null && typeof price === 'number') {
+        if (price > max_price) return false;
+      }
+
+      // 2. Stock Filter
+      if (in_stock_only && stock <= 0) return false;
+
+      // 3. Deep Feature Filter (ALL required features must match name or desc)
+      if (Array.isArray(required_features) && required_features.length > 0) {
+        for (const feature of required_features) {
+          const f = feature.toLowerCase();
+          if (!name.includes(f) && !desc.includes(f)) {
+            return false;
+          }
+        }
+      }
+
+      return true;
+    });
 
     if (productEntries.length === 0) {
       return {
         found: false,
         count: 0,
-        message: `No products found matching "${query}".`,
+        message: `No products found matching "${query}" with your specific filters.`,
       };
     }
 

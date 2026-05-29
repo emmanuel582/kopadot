@@ -268,13 +268,26 @@ export function getToolDeclarations() {
       },
       {
         name: 'searchProducts',
-        description: 'Search the product catalog by name, category, or keywords. Returns matching products with basic info and stock. Use when customer asks about product availability, searching for a product, or asking "do you have...".',
+        description: 'Search the product catalog. Use a broad, single-word query (like "Samsung" or "iPhone") and use the required_features array for specific details (like "5G", "Pink", "Dual SIM"). Returns matching products with basic info and stock.',
         parameters: {
           type: 'OBJECT',
           properties: {
             query: {
               type: 'STRING',
-              description: 'Search query — product name, category, or keywords',
+              description: 'Broad search query — e.g. brand or main category (e.g., "Samsung"). Avoid long specific phrases here.',
+            },
+            required_features: {
+              type: 'ARRAY',
+              items: { type: 'STRING' },
+              description: 'Optional: Array of specific features the product MUST have (e.g., ["5G", "Dual SIM", "Pink"]).',
+            },
+            max_price: {
+              type: 'NUMBER',
+              description: 'Optional: Maximum price budget.',
+            },
+            in_stock_only: {
+              type: 'BOOLEAN',
+              description: 'Optional: Set to true to only return products currently in stock.',
             },
             category_id: {
               type: 'STRING',

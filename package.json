@@ -11,7 +11,8 @@
     "test:chat": "node scripts/test-chat.js",
     "test:prod": "node scripts/test-production.js",
     "test:baselinker": "node scripts/test-baselinker.js",
-    "test:zendesk": "node scripts/test-zendesk-escalation.js"
+    "test:zendesk": "node scripts/test-zendesk-escalation.js",
+    "test:email-send": "node scripts/test-send-email.js"
   },
   "keywords": [
     "ai",

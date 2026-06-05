@@ -1,4 +1,5 @@
 import { baselinkerRequest } from './client.js';
+import { resolveOrderReference } from './orders.js';
 import { CACHE_TTL, TRACKING_STATUS } from '../../config/constants.js';
 import logger from '../../middleware/logger.js';
 
@@ -16,11 +17,21 @@ export async function trackShipment({ order_id }) {
   logger.info(`Tracking shipment for order: ${order_id}`);
 
   try {
+    const resolved = await resolveOrderReference(order_id);
+    if (!resolved) {
+      return {
+        found: false,
+        message: `No order found with ID #${order_id}.`,
+      };
+    }
+
+    const internalOrderId = resolved.internalOrderId;
+
     // First try getOrderPackages (dedicated package method)
     let packages = [];
     try {
       const data = await baselinkerRequest('getOrderPackages', {
-        order_id: parseInt(order_id, 10),
+        order_id: internalOrderId,
       });
       packages = data.packages || [];
     } catch (pkgError) {
@@ -29,9 +40,11 @@ export async function trackShipment({ order_id }) {
 
     // If no packages from dedicated endpoint, extract from order data
     if (packages.length === 0) {
-      const orderData = await baselinkerRequest('getOrders', {
-        order_id: parseInt(order_id, 10),
-      });
+      const orderData = resolved.order
+        ? { orders: [resolved.order] }
+        : await baselinkerRequest('getOrders', {
+          order_id: internalOrderId,
+        });
 
       if (!orderData.orders || orderData.orders.length === 0) {
         return {

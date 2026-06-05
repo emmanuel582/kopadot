@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import env from '../config/env.js';
+import { CHANNELS } from '../config/constants.js';
 import logger from '../middleware/logger.js';
 import { getToolDeclarations, executeToolCall } from './toolRegistry.js';
 
@@ -164,6 +165,23 @@ RESPONSE STYLE:
 - Sound like a friendly human colleague, very authentic, not a call centre script`;
 }
 
+function getChannelInstructions(channel) {
+  if (channel === CHANNELS.EMAIL) {
+    return `
+
+=== EMAIL REPLY RULES (ACTIVE FOR THIS MESSAGE) ===
+You are writing ONE email reply to the specific customer who sent this message.
+- Write exactly like a real person on the ${env.storeName} support team — warm, natural, and direct.
+- NEVER mention AI, bots, automation, "our system", or anything that sounds machine-generated.
+- NEVER use template phrases like "Thank you for reaching out to us" or "I understand your frustration" unless genuinely fitting.
+- Use the customer's first name in the greeting if you know it.
+- Answer their actual question first. Be helpful, not formal for the sake of it.
+- No bullet points, no markdown, no numbered lists — just normal email paragraphs.
+- Sign off naturally (e.g. "Kind regards" + your name as a team member, not "AI Support Assistant").`;
+  }
+  return '';
+}
+
 function convertHistoryToOpenAI(geminiHistory) {
   return geminiHistory.map(msg => {
     return {
@@ -292,7 +310,7 @@ export async function processMessage(message, conversationHistory = [], sessionC
 
     // Build messages array
     let messages = [
-      { role: 'system', content: buildSystemInstruction() + contextString },
+      { role: 'system', content: buildSystemInstruction() + getChannelInstructions(sessionContext?.channel) + contextString },
       ...convertHistoryToOpenAI(conversationHistory),
       { role: 'user', content: `<user_input>\n${message}\n</user_input>` }
     ];

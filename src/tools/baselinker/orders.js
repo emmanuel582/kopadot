@@ -34,6 +34,38 @@ async function resolveStatusName(statusId) {
 }
 
 /**
+ * Resolve a customer-facing order reference to BaseLinker's internal numeric order_id.
+ * Accepts internal IDs (digits only) or shop/external IDs (e.g. "DUX055103894").
+ */
+export async function resolveOrderReference(order_id) {
+  const reference = String(order_id).trim();
+  if (!reference) return null;
+
+  if (/^\d+$/.test(reference)) {
+    return {
+      internalOrderId: parseInt(reference, 10),
+      reference,
+      order: null,
+    };
+  }
+
+  const data = await baselinkerRequest('getOrders', {
+    filter_external_order_id: reference,
+    get_unconfirmed_orders: false,
+  });
+
+  const order = data.orders?.[0];
+  if (!order) return null;
+
+  return {
+    internalOrderId: order.order_id,
+    reference,
+    externalOrderId: order.external_order_id,
+    order,
+  };
+}
+
+/**
  * Look up an order by order ID.
  * @param {object} params - { order_id: string }
  * @returns {object} Order summary for the AI to narrate.
@@ -42,16 +74,27 @@ export async function lookupOrderById({ order_id }) {
   logger.info(`Looking up order by ID: ${order_id}`);
 
   try {
-    const data = await baselinkerRequest('getOrders', {
-      order_id: parseInt(order_id, 10),
-    });
-
-    if (!data.orders || data.orders.length === 0) {
+    const resolved = await resolveOrderReference(order_id);
+    if (!resolved) {
       return { found: false, message: `No order found with ID #${order_id}.` };
     }
 
-    const order = data.orders[0];
-    return await formatOrderSummary(order);
+    let order = resolved.order;
+    if (!order) {
+      const data = await baselinkerRequest('getOrders', {
+        order_id: resolved.internalOrderId,
+      });
+      if (!data.orders?.length) {
+        return { found: false, message: `No order found with ID #${order_id}.` };
+      }
+      order = data.orders[0];
+    }
+
+    const summary = await formatOrderSummary(order);
+    if (resolved.reference !== String(resolved.internalOrderId)) {
+      summary.customer_reference = resolved.reference;
+    }
+    return summary;
   } catch (error) {
     logger.error(`Order lookup failed: ${error.message}`);
     return {
@@ -402,6 +445,7 @@ async function formatOrderSummary(order) {
 }
 
 export default {
+  resolveOrderReference,
   lookupOrderById,
   lookupOrderByEmail,
   lookupOrderByPhone,

@@ -97,7 +97,7 @@ export function getToolDeclarations() {
           properties: {
             order_id: {
               type: 'STRING',
-              description: 'The order ID number (digits only, e.g. "29828903")',
+              description: 'The order ID or shop order number (e.g. "29828903" or "DUX055103894")',
             },
           },
           required: ['order_id'],
@@ -195,7 +195,7 @@ export function getToolDeclarations() {
           properties: {
             order_id: {
               type: 'STRING',
-              description: 'The order ID to track',
+              description: 'The order ID or shop order number to track (e.g. "29828903" or "DUX055103894")',
             },
           },
           required: ['order_id'],

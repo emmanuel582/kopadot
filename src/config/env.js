@@ -43,6 +43,7 @@ const env = {
   msGraphClientId: process.env.MS_GRAPH_CLIENT_ID,
   msGraphClientSecret: process.env.MS_GRAPH_CLIENT_SECRET,
   msGraphUserId: process.env.MS_GRAPH_USER_ID,
+  emailPollIntervalMs: parseInt(process.env.EMAIL_POLL_INTERVAL_MS || '180000', 10),
 
   // Store
   storeName: process.env.STORE_NAME || 'Our Store',

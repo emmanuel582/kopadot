@@ -82,6 +82,39 @@ function trackProcessedMessage(messageId) {
   }
 }
 
+const AUTOMATED_SENDER_PATTERNS = [
+  /no[-_.]?reply/i,
+  /donotreply/i,
+  /do[-_.]?not[-_.]?reply/i,
+  /mailer-daemon/i,
+  /postmaster@/i,
+  /bounce@/i,
+  /notifications?@/i,
+  /alerts?@/i,
+];
+
+/**
+ * Hard-filter obvious non-customer emails before the AI classifier runs.
+ */
+function isObviousNonCustomerEmail(senderEmail) {
+  if (!senderEmail) {
+    return { skip: true, reason: 'no_sender_address' };
+  }
+
+  const normalized = senderEmail.toLowerCase().trim();
+  const ownMailbox = env.msGraphUserId?.toLowerCase().trim();
+
+  if (ownMailbox && normalized === ownMailbox) {
+    return { skip: true, reason: 'sent_from_own_mailbox' };
+  }
+
+  if (AUTOMATED_SENDER_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return { skip: true, reason: 'automated_sender_address' };
+  }
+
+  return { skip: false };
+}
+
 /**
  * Classify whether an inbound email needs a personalized support reply.
  */
@@ -149,9 +182,17 @@ async function fetchUnreadMessages(client) {
 }
 
 async function markEmailAsRead(client, messageId) {
-  await client
-    .api(`/users/${env.msGraphUserId}/messages/${messageId}`)
-    .patch({ isRead: true });
+  try {
+    await client
+      .api(`/users/${env.msGraphUserId}/messages/${messageId}`)
+      .patch({ isRead: true });
+  } catch (error) {
+    // PATCH requires Mail.ReadWrite; read + reply only need Mail.Read + Mail.Send.
+    logger.warn(`Could not mark email as read: ${error.message}`, {
+      messageId,
+      hint: 'Grant Mail.ReadWrite application permission in Azure AD and re-consent',
+    });
+  }
 }
 
 async function sendEmailReply(client, messageId, htmlContent) {
@@ -182,6 +223,14 @@ async function processInboundEmail(client, msg) {
   const bodyPreview = msg.bodyPreview || '';
   const plainBody = stripHtml(msg.body?.content) || bodyPreview;
 
+  const hardFilter = isObviousNonCustomerEmail(senderEmail);
+  if (hardFilter.skip) {
+    logger.debug(`Email skipped (hard filter): "${subject}" from ${senderEmail} — ${hardFilter.reason}`);
+    await markEmailAsRead(client, msg.id);
+    trackProcessedMessage(msg.id);
+    return;
+  }
+
   const { shouldRespond, reason } = await shouldRespondToEmail(subject, plainBody.slice(0, 1500), senderEmail);
 
   if (!shouldRespond) {
@@ -207,7 +256,7 @@ async function processInboundEmail(client, msg) {
   const escalationCheck = shouldAutoEscalate(sessionId);
   if (escalationCheck.shouldEscalate) {
     const fallback = formatResponse(
-      'Thank you for your patience. I have passed your enquiry to a member of our support team who will review the full conversation and get back to you by email within 24 hours.',
+      'Thanks for bearing with me on this one. I have passed your message to a colleague on our team who will pick this up and get back to you by email within 24 hours.',
       CHANNELS.EMAIL,
       {
         subject: subject.startsWith('Re:') ? subject : `Re: ${subject}`,
@@ -223,10 +272,12 @@ async function processInboundEmail(client, msg) {
 
   const history = getHistory(sessionId);
   const customerIdentity = { name: senderName, email: senderEmail };
+  const firstName = senderName?.split(' ')[0] || null;
   const emailContent = [
-    'The customer sent the following email. Reply as a professional support email.',
-    'Use a warm greeting with their name if known, answer their question fully using tools when needed,',
-    'and close with a polite sign-off. Do not use markdown.',
+    `Reply to this customer's email. Write like a real ${env.storeName} support team member — natural, warm, human.`,
+    'Never sound like AI or a bot. No markdown. Answer their question directly using tools when needed.',
+    firstName ? `Customer name: ${firstName}` : 'Customer name: unknown',
+    `Customer email: ${senderEmail}`,
     '',
     `Subject: ${subject}`,
     '',
@@ -252,10 +303,12 @@ async function processInboundEmail(client, msg) {
     storeName: env.storeName,
   });
 
+  // Graph /reply always goes back to the sender of this specific message — never a random address.
   await sendEmailReply(client, msg.id, formatted.html);
 
-  logger.info(`Email reply sent for "${subject}"`, {
+  logger.info(`Email reply sent to ${senderEmail} for "${subject}"`, {
     sessionId,
+    replyTo: senderEmail,
     toolsUsed: (agentResult.toolsUsed || []).map((t) => t.name),
     processingTimeMs: agentResult.metadata?.processingTimeMs,
   });
@@ -307,9 +360,9 @@ export async function pollEmails() {
 
 /**
  * Starts the polling loop.
- * @param {number} intervalMs - Polling interval in milliseconds. Default: 10 mins.
+ * @param {number} intervalMs - Polling interval in milliseconds. Default: 3 mins.
  */
-export function startEmailPolling(intervalMs = 10 * 60 * 1000) {
+export function startEmailPolling(intervalMs = 3 * 60 * 1000) {
   logger.info(`Starting Microsoft 365 Email Polling every ${intervalMs / 60000} minutes...`);
 
   const runPoll = () => {

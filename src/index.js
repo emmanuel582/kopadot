@@ -81,7 +81,7 @@ attachLiveChat(server);
 
 // Start polling for Microsoft 365 emails
 if (env.msGraphTenantId && env.msGraphClientId && env.msGraphClientSecret && env.msGraphUserId) {
-  startEmailPolling();
+  startEmailPolling(env.emailPollIntervalMs);
 } else {
   logger.info('Microsoft 365 Email Polling disabled (missing Graph credentials).');
 }

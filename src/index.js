@@ -80,10 +80,10 @@ const server = createServer(app);
 attachLiveChat(server);
 
 // Start polling for Microsoft 365 emails
-if (env.msGraphTenantId && env.msGraphClientId) {
+if (env.msGraphTenantId && env.msGraphClientId && env.msGraphClientSecret && env.msGraphUserId) {
   startEmailPolling();
 } else {
-  logger.info('Microsoft 365 Email Polling disabled (missing credentials).');
+  logger.info('Microsoft 365 Email Polling disabled (missing Graph credentials).');
 }
 
 server.listen(env.port, () => {

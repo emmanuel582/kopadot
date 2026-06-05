@@ -11,7 +11,7 @@ import webhookRouter from './channels/webhook.js';
 import zendeskRouter from './channels/zendesk.js';
 import { attachLiveChat } from './channels/livechat.js';
 import { getSessionStats } from './agent/conversationMgr.js';
-import { startEmailPolling } from './channels/email.js';
+import { startEmailPolling, verifyGraphConnection } from './channels/email.js';
 
 /**
  * KopaDot — AI E-Commerce Support Agent
@@ -79,11 +79,26 @@ const server = createServer(app);
 // Attach WebSocket live chat
 attachLiveChat(server);
 
-// Start polling for Microsoft 365 emails
-if (env.msGraphTenantId && env.msGraphClientId && env.msGraphClientSecret && env.msGraphUserId) {
-  startEmailPolling(env.emailPollIntervalMs);
+// Start polling for Microsoft 365 emails (paused until EMAIL_POLLING_ENABLED=true)
+if (!env.emailPollingEnabled) {
+  logger.info('Microsoft 365 email polling is PAUSED. Set EMAIL_POLLING_ENABLED=true to resume after Mail.ReadWrite is approved.');
+} else if (env.msGraphTenantId && env.msGraphClientId && env.msGraphClientSecret && env.msGraphUserId) {
+  verifyGraphConnection()
+    .then((result) => {
+      if (result.ok) {
+        startEmailPolling(env.emailPollIntervalMs);
+      }
+    })
+    .catch((error) => {
+      logger.error(`Email startup check failed: ${error.message}`);
+    });
 } else {
-  logger.info('Microsoft 365 Email Polling disabled (missing Graph credentials).');
+  logger.warn('Microsoft 365 Email Polling disabled (missing Graph credentials).', {
+    MS_GRAPH_TENANT_ID: Boolean(env.msGraphTenantId),
+    MS_GRAPH_CLIENT_ID: Boolean(env.msGraphClientId),
+    MS_GRAPH_CLIENT_SECRET: Boolean(env.msGraphClientSecret),
+    MS_GRAPH_USER_ID: Boolean(env.msGraphUserId),
+  });
 }
 
 server.listen(env.port, () => {

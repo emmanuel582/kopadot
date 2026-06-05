@@ -59,28 +59,29 @@ function formatForLiveChat(text, metadata) {
  * Email — professional HTML structure with optional personalization.
  */
 function formatForEmail(text, metadata) {
-  const cleaned = stripMarkdown(text).trim();
+  const teamName = metadata.agentName || `${metadata.storeName || 'KopaDot'} Support Team`;
+  const cleaned = sanitizeEmailBody(stripMarkdown(text), teamName).trim();
   const paragraphs = cleaned
     .split('\n\n')
     .map((p) => p.trim())
-    .filter(Boolean);
+    .filter((p) => p && !isPlaceholderLine(p));
 
   const hasGreeting = /^(dear|hi|hello|good (morning|afternoon|evening))/i.test(paragraphs[0] || '');
-  const hasSignOff = /(kind regards|best regards|warm regards|sincerely|thank you)/i.test(
-    paragraphs[paragraphs.length - 1] || '',
-  );
+  const hasValidSignOff = paragraphs.some((p) => isValidEmailSignOff(p, teamName));
 
   const greeting = !hasGreeting && metadata.customerName
-    ? `<p style="margin: 0 0 16px;">Dear ${escapeHtml(metadata.customerName)},</p>`
+    ? `<p style="margin: 0 0 16px;">Hi ${escapeHtml(metadata.customerName.split(' ')[0])},</p>`
     : '';
 
-  const bodyHtml = paragraphs
+  const bodyParagraphs = hasValidSignOff
+    ? paragraphs.slice(0, -1)
+    : paragraphs;
+
+  const bodyHtml = bodyParagraphs
     .map((p) => `<p style="margin: 0 0 16px; line-height: 1.6; color: #333;">${escapeHtml(p).replace(/\n/g, '<br>')}</p>`)
     .join('\n');
 
-  const signOff = !hasSignOff
-    ? `<p style="margin: 24px 0 0; line-height: 1.6; color: #333;">Kind regards,<br><strong>${escapeHtml(metadata.storeName || 'Customer Support Team')}</strong></p>`
-    : '';
+  const signOff = `<p style="margin: 24px 0 0; line-height: 1.6; color: #333;">Kind regards,<br><strong>${escapeHtml(teamName)}</strong></p>`;
 
   return {
     type: 'email',
@@ -106,7 +107,34 @@ function stripMarkdown(text) {
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
     .replace(/^[-*]\s+/gm, '')
-    .replace(/^#{1,6}\s+/gm, '');
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^(\d+)\.\s+/gm, '');
+}
+
+const PLACEHOLDER_LINE = /^\[.*\]$/i;
+
+function isPlaceholderLine(line) {
+  return PLACEHOLDER_LINE.test(line.trim())
+    || /^\[(your name|name|insert name)\]$/i.test(line.trim());
+}
+
+function sanitizeEmailBody(text, teamName) {
+  return text
+    .replace(/\[Your Name\]/gi, teamName)
+    .replace(/\[your name\]/gi, teamName)
+    .replace(/\[Name\]/gi, teamName)
+    .replace(/\[insert name\]/gi, teamName)
+    .replace(/\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g, '$2')
+    .replace(/Looking forward to your reply!/gi, '')
+    .replace(/Thanks for reaching out!/gi, '')
+    .trim();
+}
+
+function isValidEmailSignOff(paragraph, teamName) {
+  if (isPlaceholderLine(paragraph)) return false;
+  if (/\[(your name|name)\]/i.test(paragraph)) return false;
+  return /(kind regards|best regards|warm regards|sincerely)/i.test(paragraph)
+    || paragraph.includes(teamName);
 }
 
 /**

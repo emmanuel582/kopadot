@@ -44,6 +44,11 @@ const env = {
   msGraphClientSecret: process.env.MS_GRAPH_CLIENT_SECRET,
   msGraphUserId: process.env.MS_GRAPH_USER_ID,
   emailPollIntervalMs: parseInt(process.env.EMAIL_POLL_INTERVAL_MS || '180000', 10),
+  emailLookbackHours: parseInt(process.env.EMAIL_LOOKBACK_HOURS || '48', 10),
+  emailMaxPerPoll: parseInt(process.env.EMAIL_MAX_PER_POLL || '30', 10),
+  // Set EMAIL_POLLING_ENABLED=true on Render to resume inbox polling after Mail.ReadWrite is approved.
+  emailPollingEnabled: process.env.EMAIL_POLLING_ENABLED === 'true',
+  emailAgentSignoffName: process.env.EMAIL_AGENT_SIGNOFF_NAME || 'The KopaDot Support Team',
 
   // Store
   storeName: process.env.STORE_NAME || 'Our Store',

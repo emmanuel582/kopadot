@@ -176,8 +176,9 @@ You are writing ONE email reply to the specific customer who sent this message.
 - NEVER use template phrases like "Thank you for reaching out to us" or "I understand your frustration" unless genuinely fitting.
 - Use the customer's first name in the greeting if you know it.
 - Answer their actual question first. Be helpful, not formal for the sake of it.
-- No bullet points, no markdown, no numbered lists — just normal email paragraphs.
-- Sign off naturally (e.g. "Kind regards" + your name as a team member, not "AI Support Assistant").`;
+- No bullet points, no markdown, no numbered lists, no hyperlinks in [text](url) format — use plain URLs only.
+- NEVER use placeholders like [Your Name], [Name], or [insert name]. End with exactly: "Kind regards," then a new line with "${env.emailAgentSignoffName}".
+- Do NOT add a second team name line after the sign-off. Do NOT write "Looking forward to your reply!" — end cleanly after answering.`;
   }
   return '';
 }

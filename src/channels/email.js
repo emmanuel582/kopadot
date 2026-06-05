@@ -21,7 +21,18 @@ const openai = new OpenAI({ apiKey: env.openaiApiKey });
 let graphClient = null;
 let isPolling = false;
 const processedMessageIds = new Set();
-const MAX_PROCESSED_IDS = 2000;
+const MAX_PROCESSED_IDS = 5000;
+
+function getOwnMailbox() {
+  return env.msGraphUserId?.toLowerCase().trim() || '';
+}
+
+function getLookbackSinceIso() {
+  const since = Date.now() - env.emailLookbackHours * 60 * 60 * 1000;
+  return new Date(since).toISOString();
+}
+
+const MESSAGE_SELECT = 'id,subject,bodyPreview,from,body,conversationId,receivedDateTime,isRead';
 
 function getGraphClient() {
   if (graphClient) return graphClient;
@@ -55,6 +66,60 @@ function getGraphClient() {
 
   graphClient = Client.init({ authProvider });
   return graphClient;
+}
+
+function getGraphConfigStatus() {
+  return {
+    tenantId: Boolean(env.msGraphTenantId),
+    clientId: Boolean(env.msGraphClientId),
+    clientSecret: Boolean(env.msGraphClientSecret),
+    userId: Boolean(env.msGraphUserId),
+    mailbox: env.msGraphUserId || null,
+  };
+}
+
+/**
+ * Verify Graph credentials on startup — logs clearly if Render env vars are missing.
+ */
+export async function verifyGraphConnection() {
+  const config = getGraphConfigStatus();
+  const missing = Object.entries(config)
+    .filter(([key, value]) => key !== 'mailbox' && !value)
+    .map(([key]) => key);
+
+  if (missing.length > 0) {
+    logger.error('Microsoft Graph email disabled — missing env vars on Render', {
+      missing,
+      hint: 'Set MS_GRAPH_TENANT_ID, MS_GRAPH_CLIENT_ID, MS_GRAPH_CLIENT_SECRET, MS_GRAPH_USER_ID in Render dashboard',
+    });
+    return { ok: false, reason: 'missing_credentials', missing };
+  }
+
+  logger.info('Microsoft Graph config loaded', {
+    mailbox: config.mailbox,
+    pollIntervalMinutes: env.emailPollIntervalMs / 60000,
+    lookbackHours: env.emailLookbackHours,
+  });
+
+  const client = getGraphClient();
+  if (!client) {
+    return { ok: false, reason: 'client_init_failed' };
+  }
+
+  try {
+    await client
+      .api(`/users/${env.msGraphUserId}`)
+      .select('mail,userPrincipalName')
+      .get();
+    logger.info('Microsoft Graph connection verified — read access OK', { mailbox: config.mailbox });
+    return { ok: true, mailbox: config.mailbox };
+  } catch (error) {
+    logger.error(`Microsoft Graph connection failed: ${error.message}`, {
+      mailbox: config.mailbox,
+      hint: 'Check Azure app permissions (Mail.Read, Mail.Send, Mail.ReadWrite) and admin consent',
+    });
+    return { ok: false, reason: error.message };
+  }
 }
 
 function stripHtml(html) {
@@ -93,16 +158,86 @@ const AUTOMATED_SENDER_PATTERNS = [
   /alerts?@/i,
 ];
 
+const INTERNAL_NOTIFICATION_PATTERNS = [
+  /^\[KopaDot\]/i,
+  /ticket\s*\(#\d+\)\s*by/i,
+  /has been received\.\s*It is unassigned/i,
+];
+
+const MARKETING_SUBJECT_PATTERNS = [
+  /ship now/i,
+  /you made the sale/i,
+  /you have a new order/i,
+  /upgrade reminder/i,
+  /newsletter/i,
+  /\bseo\b/i,
+  /partnership opportunity/i,
+  /wholesale/i,
+  /traffic magnet/i,
+  /conversion flow/i,
+  /website design/i,
+  /refurbished.*screen/i,
+  /months pro free/i,
+  /could we discuss/i,
+  /store structure observation/i,
+  /re:\s*\[\[/i,
+  /reminder to speed up/i,
+  /approaching delivery times/i,
+  /order\(s\) about to be late/i,
+  /successfully cancelled an order/i,
+  /buyer wants to cancel/i,
+  /statement summary is ready/i,
+  /new device is using your account/i,
+  /has shipped your sold item/i,
+  /your order has shipped/i,
+  /fulfilment order/i,
+  /refund initiated/i,
+  /feedback notification/i,
+  /sent a message about/i,
+  /limited-time.*discount/i,
+];
+
+const PLATFORM_SENDER_DOMAINS = [
+  '@amazon.',
+  '@ebay.',
+  '@zendesk.com',
+  '@parcelpanel',
+  '@ingrammicro',
+  '@marketplace.',
+  '@google.com',
+  '@facebookmail.com',
+];
+
+const CUSTOMER_SUPPORT_SIGNALS = [
+  /\border\s*(#?\d{5,}|number|dux\d+)/i,
+  /\bcancel(l)?(ing|ation)?\b/i,
+  /\brefund\b/i,
+  /\breturn\b/i,
+  /\btrack(ing)?\b/i,
+  /\bship(ped|ping)?\b/i,
+  /where is my/i,
+  /haven'?t received/i,
+  /not received/i,
+  /not dispatched/i,
+  /\bdelivery\b/i,
+  /\bhelp\b/i,
+  /\bissue\b/i,
+  /\bproblem\b/i,
+  /\bpolicy on\b/i,
+  /\?\s*$/,
+  /\?/,
+];
+
 /**
  * Hard-filter obvious non-customer emails before the AI classifier runs.
  */
-function isObviousNonCustomerEmail(senderEmail) {
+function isObviousNonCustomerEmail(senderEmail, subject = '', bodyPreview = '') {
   if (!senderEmail) {
     return { skip: true, reason: 'no_sender_address' };
   }
 
   const normalized = senderEmail.toLowerCase().trim();
-  const ownMailbox = env.msGraphUserId?.toLowerCase().trim();
+  const ownMailbox = getOwnMailbox();
 
   if (ownMailbox && normalized === ownMailbox) {
     return { skip: true, reason: 'sent_from_own_mailbox' };
@@ -112,7 +247,44 @@ function isObviousNonCustomerEmail(senderEmail) {
     return { skip: true, reason: 'automated_sender_address' };
   }
 
+  const combined = `${subject}\n${bodyPreview}`;
+  if (INTERNAL_NOTIFICATION_PATTERNS.some((pattern) => pattern.test(combined))) {
+    return { skip: true, reason: 'internal_system_notification' };
+  }
+
   return { skip: false };
+}
+
+function isLikelyCustomerSupport(subject, bodyPreview) {
+  const combined = `${subject}\n${bodyPreview}`;
+  return CUSTOMER_SUPPORT_SIGNALS.some((pattern) => pattern.test(combined));
+}
+
+function shouldSkipWithoutGpt(senderEmail, subject) {
+  const normalized = senderEmail?.toLowerCase() || '';
+  if (PLATFORM_SENDER_DOMAINS.some((domain) => normalized.includes(domain))) {
+    return { skip: true, reason: 'platform_notification_sender' };
+  }
+  if (MARKETING_SUBJECT_PATTERNS.some((pattern) => pattern.test(subject))) {
+    return { skip: true, reason: 'marketing_or_automated_subject' };
+  }
+  return { skip: false };
+}
+
+/**
+ * Decide if we should reply — uses GPT only for ambiguous emails.
+ */
+async function classifyEmailNeed(subject, bodyPreview, senderEmail) {
+  const noGptSkip = shouldSkipWithoutGpt(senderEmail, subject);
+  if (noGptSkip.skip) {
+    return { shouldRespond: false, reason: noGptSkip.reason };
+  }
+
+  if (isLikelyCustomerSupport(subject, bodyPreview)) {
+    return { shouldRespond: true, reason: 'customer_support_signals' };
+  }
+
+  return shouldRespondToEmail(subject, bodyPreview, senderEmail);
 }
 
 /**
@@ -155,30 +327,117 @@ Respond ONLY with JSON: {"needs_response": true/false, "reason": "brief reason"}
     const result = JSON.parse(response.choices[0].message.content);
     return { shouldRespond: Boolean(result.needs_response), reason: result.reason || '' };
   } catch (error) {
-    logger.warn(`Failed to classify email: ${error.message}`);
-    return { shouldRespond: false, reason: 'classification_failed' };
+    logger.warn(`Failed to classify email: ${error.message} — defaulting to reply`);
+    return { shouldRespond: true, reason: 'classification_failed_default_reply' };
   }
 }
 
-async function fetchUnreadMessages(client) {
+async function fetchMessagePage(client, requestBuilder, maxMessages) {
   const messages = [];
-  let request = client
-    .api(`/users/${env.msGraphUserId}/messages`)
-    .filter('isRead eq false')
-    .select('id,subject,bodyPreview,from,body,conversationId')
-    .top(10);
-
-  let response = await request.get();
+  let response = await requestBuilder.get();
   messages.push(...(response.value || []));
 
   let nextLink = response['@odata.nextLink'];
-  while (nextLink && messages.length < 30) {
+  while (nextLink && messages.length < maxMessages) {
     response = await client.api(nextLink).get();
     messages.push(...(response.value || []));
     nextLink = response['@odata.nextLink'];
   }
 
-  return messages;
+  return messages.slice(0, maxMessages);
+}
+
+/**
+ * Fetch inbox candidates: prioritises the last 6 hours (read or unread), then
+ * unread mail, then the wider lookback window.
+ */
+async function fetchCandidateMessages(client) {
+  const inbox = `/users/${env.msGraphUserId}/mailFolders/inbox/messages`;
+  const cap = env.emailMaxPerPoll;
+  const sinceIso = getLookbackSinceIso();
+
+  const [priorityRecent, unread, lookback] = await Promise.all([
+    fetchMessagePage(
+      client,
+      client.api(inbox).select(MESSAGE_SELECT).top(40),
+      40,
+    ),
+    fetchMessagePage(
+      client,
+      client.api(inbox).filter('isRead eq false').select(MESSAGE_SELECT).top(15),
+      15,
+    ),
+    fetchMessagePage(
+      client,
+      client.api(inbox).filter(`receivedDateTime ge ${sinceIso}`).select(MESSAGE_SELECT).top(20),
+      20,
+    ),
+  ]);
+
+  const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
+  const priorityRecentFiltered = priorityRecent.filter(
+    (m) => new Date(m.receivedDateTime).getTime() >= sixHoursAgo,
+  );
+  const priorityIds = new Set(priorityRecentFiltered.map((m) => m.id));
+  const byId = new Map();
+
+  for (const msg of priorityRecentFiltered) byId.set(msg.id, msg);
+  for (const msg of unread) if (!byId.has(msg.id)) byId.set(msg.id, msg);
+  for (const msg of lookback) if (!byId.has(msg.id)) byId.set(msg.id, msg);
+
+  return [...byId.values()]
+    .sort((a, b) => {
+      const aPriority = priorityIds.has(a.id) ? 0 : 1;
+      const bPriority = priorityIds.has(b.id) ? 0 : 1;
+      if (aPriority !== bPriority) return aPriority - bPriority;
+      return new Date(a.receivedDateTime) - new Date(b.receivedDateTime);
+    })
+    .slice(0, cap);
+}
+
+/**
+ * Load recent outbound mail from Sent Items to detect replies we already sent
+ * (survives Render restarts — in-memory dedup alone does not).
+ */
+async function fetchRecentSentMessages(client) {
+  const sinceIso = getLookbackSinceIso();
+  try {
+    return await fetchMessagePage(
+      client,
+      client
+        .api(`/users/${env.msGraphUserId}/mailFolders/sentitems/messages`)
+        .filter(`sentDateTime ge ${sinceIso}`)
+        .select('id,conversationId,sentDateTime,from,subject')
+        .top(50),
+      100,
+    );
+  } catch (error) {
+    logger.warn(`Could not load sent items for dedup: ${error.message}`);
+    return [];
+  }
+}
+
+function isCountableSupportReply(sent) {
+  const subject = sent.subject || '';
+  if (/^\[KopaDot\]/i.test(subject)) return false;
+  if (/ticket\s*\(#\d+\)/i.test(subject)) return false;
+  return true;
+}
+
+function wasAlreadyRepliedTo(inboundMsg, sentMessages) {
+  if (!inboundMsg.conversationId || !inboundMsg.receivedDateTime) return false;
+
+  const ownMailbox = getOwnMailbox();
+  const inboundTime = new Date(inboundMsg.receivedDateTime).getTime();
+
+  return sentMessages.some((sent) => {
+    if (!isCountableSupportReply(sent)) return false;
+    if (sent.conversationId !== inboundMsg.conversationId) return false;
+    const from = sent.from?.emailAddress?.address?.toLowerCase().trim();
+    if (from !== ownMailbox) return false;
+    const sentTime = new Date(sent.sentDateTime).getTime();
+    return sentTime > inboundTime;
+  });
 }
 
 async function markEmailAsRead(client, messageId) {
@@ -211,10 +470,10 @@ async function sendEmailReply(client, messageId, htmlContent) {
 /**
  * Process a single inbound email through the AI agent and reply if appropriate.
  */
-async function processInboundEmail(client, msg) {
+async function processInboundEmail(client, msg, sentMessages = [], { force = false } = {}) {
   if (processedMessageIds.has(msg.id)) {
     logger.debug(`Skipping already-processed email: ${msg.id}`);
-    return;
+    return { replied: false, reason: 'already_processed' };
   }
 
   const senderEmail = msg.from?.emailAddress?.address || null;
@@ -223,21 +482,30 @@ async function processInboundEmail(client, msg) {
   const bodyPreview = msg.bodyPreview || '';
   const plainBody = stripHtml(msg.body?.content) || bodyPreview;
 
-  const hardFilter = isObviousNonCustomerEmail(senderEmail);
+  if (!force && wasAlreadyRepliedTo(msg, sentMessages)) {
+    logger.debug(`Skipping email already replied to: "${subject}" from ${senderEmail}`, {
+      messageId: msg.id,
+      conversationId: msg.conversationId,
+    });
+    trackProcessedMessage(msg.id);
+    return { replied: false, reason: 'already_replied' };
+  }
+
+  const hardFilter = isObviousNonCustomerEmail(senderEmail, subject, bodyPreview);
   if (hardFilter.skip) {
     logger.debug(`Email skipped (hard filter): "${subject}" from ${senderEmail} — ${hardFilter.reason}`);
     await markEmailAsRead(client, msg.id);
     trackProcessedMessage(msg.id);
-    return;
+    return { replied: false, reason: hardFilter.reason };
   }
 
-  const { shouldRespond, reason } = await shouldRespondToEmail(subject, plainBody.slice(0, 1500), senderEmail);
+  const { shouldRespond, reason } = await classifyEmailNeed(subject, plainBody.slice(0, 1500), senderEmail);
 
   if (!shouldRespond) {
     logger.debug(`Email skipped (no reply needed): "${subject}" — ${reason}`);
     await markEmailAsRead(client, msg.id);
     trackProcessedMessage(msg.id);
-    return;
+    return { replied: false, reason };
   }
 
   logger.info(`Email needs support reply: "${subject}" from ${senderEmail || 'unknown'}`);
@@ -262,12 +530,18 @@ async function processInboundEmail(client, msg) {
         subject: subject.startsWith('Re:') ? subject : `Re: ${subject}`,
         customerName: senderName,
         storeName: env.storeName,
+        agentName: env.emailAgentSignoffName,
       },
     );
     await sendEmailReply(client, msg.id, fallback.html);
+    sentMessages.push({
+      conversationId: msg.conversationId,
+      sentDateTime: new Date().toISOString(),
+      from: { emailAddress: { address: env.msGraphUserId } },
+    });
     await markEmailAsRead(client, msg.id);
     trackProcessedMessage(msg.id);
-    return;
+    return { replied: true, reason: 'escalated' };
   }
 
   const history = getHistory(sessionId);
@@ -301,10 +575,17 @@ async function processInboundEmail(client, msg) {
     subject: subject.startsWith('Re:') ? subject : `Re: ${subject}`,
     customerName: senderName,
     storeName: env.storeName,
+    agentName: env.emailAgentSignoffName,
   });
 
   // Graph /reply always goes back to the sender of this specific message — never a random address.
   await sendEmailReply(client, msg.id, formatted.html);
+
+  sentMessages.push({
+    conversationId: msg.conversationId,
+    sentDateTime: new Date().toISOString(),
+    from: { emailAddress: { address: env.msGraphUserId } },
+  });
 
   logger.info(`Email reply sent to ${senderEmail} for "${subject}"`, {
     sessionId,
@@ -315,10 +596,11 @@ async function processInboundEmail(client, msg) {
 
   await markEmailAsRead(client, msg.id);
   trackProcessedMessage(msg.id);
+  return { replied: true, reason: 'support_reply' };
 }
 
 /**
- * Poll the inbox for unread customer emails and respond via the AI agent.
+ * Poll the inbox for customer emails and respond via the AI agent.
  */
 export async function pollEmails() {
   if (isPolling) {
@@ -332,18 +614,22 @@ export async function pollEmails() {
   isPolling = true;
 
   try {
-    logger.debug('Polling Microsoft 365 for new emails...');
-    const messages = await fetchUnreadMessages(client);
+    logger.debug('Polling Microsoft 365 inbox for customer emails...');
+    const [messages, sentMessages] = await Promise.all([
+      fetchCandidateMessages(client),
+      fetchRecentSentMessages(client),
+    ]);
 
     if (messages.length === 0) {
       return;
     }
 
-    logger.info(`Found ${messages.length} unread email(s). Processing...`);
+    const unreadCount = messages.filter((m) => !m.isRead).length;
+    logger.info(`Found ${messages.length} candidate email(s) (${unreadCount} unread, lookback ${env.emailLookbackHours}h). Processing...`);
 
     for (const msg of messages) {
       try {
-        await processInboundEmail(client, msg);
+        await processInboundEmail(client, msg, sentMessages);
       } catch (error) {
         logger.error(`Failed to process email "${msg.subject}": ${error.message}`, {
           messageId: msg.id,
@@ -375,4 +661,68 @@ export function startEmailPolling(intervalMs = 3 * 60 * 1000) {
   setInterval(runPoll, intervalMs);
 }
 
-export default { startEmailPolling, pollEmails, processInboundEmail };
+/**
+ * Find a specific inbox message by sender and/or subject (for targeted replies).
+ */
+export async function findInboxMessage({ fromEmail, subjectContains }) {
+  const client = getGraphClient();
+  if (!client) return null;
+
+  const inbox = `/users/${env.msGraphUserId}/mailFolders/inbox/messages`;
+  const messages = await fetchMessagePage(
+    client,
+    client.api(inbox).select(MESSAGE_SELECT).top(100),
+    150,
+  );
+
+  const fromNorm = fromEmail?.toLowerCase().trim();
+  const subjectNorm = subjectContains?.toLowerCase().trim();
+
+  const matches = messages.filter((m) => {
+    const addr = m.from?.emailAddress?.address?.toLowerCase().trim();
+    if (fromNorm && addr !== fromNorm) return false;
+    if (subjectNorm && !m.subject?.toLowerCase().includes(subjectNorm)) return false;
+    return true;
+  });
+
+  return matches.sort((a, b) => new Date(b.receivedDateTime) - new Date(a.receivedDateTime))[0] || null;
+}
+
+/**
+ * Process one specific email by sender/subject — bypasses the poll queue.
+ */
+export async function replyToSpecificEmail({ fromEmail, subjectContains, force = false }) {
+  const client = getGraphClient();
+  if (!client) throw new Error('Graph client not configured');
+
+  const msg = await findInboxMessage({ fromEmail, subjectContains });
+  if (!msg) {
+    throw new Error(`No inbox message found from ${fromEmail || 'any'} with subject containing "${subjectContains || ''}"`);
+  }
+
+  const sentMessages = await fetchRecentSentMessages(client);
+  if (!force && wasAlreadyRepliedTo(msg, sentMessages)) {
+    logger.info(`Already replied to "${msg.subject}" from ${fromEmail} — skipping`);
+    return { replied: false, reason: 'already_replied', messageId: msg.id };
+  }
+
+  processedMessageIds.delete(msg.id);
+
+  const result = await processInboundEmail(client, msg, sentMessages, { force });
+  return {
+    replied: Boolean(result?.replied),
+    reason: result?.reason,
+    subject: msg.subject,
+    messageId: msg.id,
+    to: fromEmail,
+  };
+}
+
+export default {
+  startEmailPolling,
+  pollEmails,
+  processInboundEmail,
+  verifyGraphConnection,
+  findInboxMessage,
+  replyToSpecificEmail,
+};

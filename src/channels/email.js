@@ -20,6 +20,7 @@ const openai = new OpenAI({ apiKey: env.openaiApiKey });
 
 let graphClient = null;
 let isPolling = false;
+let escalatedFolderId = null;
 const processedMessageIds = new Set();
 const MAX_PROCESSED_IDS = 5000;
 
@@ -112,7 +113,21 @@ export async function verifyGraphConnection() {
       .select('mail,userPrincipalName')
       .get();
     logger.info('Microsoft Graph connection verified — read access OK', { mailbox: config.mailbox });
-    return { ok: true, mailbox: config.mailbox };
+
+    const folder = await ensureEscalatedFolder(client);
+    if (!folder?.id) {
+      logger.error('Escalated mail folder could not be created or found', {
+        folderName: env.emailEscalatedFolderName,
+        hint: 'Grant Mail.ReadWrite application permission in Azure AD and re-consent',
+      });
+      return { ok: false, reason: 'escalated_folder_unavailable' };
+    }
+
+    logger.info('Escalated folder ready', {
+      folderName: env.emailEscalatedFolderName,
+      folderId: folder.id,
+    });
+    return { ok: true, mailbox: config.mailbox, escalatedFolderId: folder.id };
   } catch (error) {
     logger.error(`Microsoft Graph connection failed: ${error.message}`, {
       mailbox: config.mailbox,
@@ -120,6 +135,106 @@ export async function verifyGraphConnection() {
     });
     return { ok: false, reason: error.message };
   }
+}
+
+/**
+ * Find or create the human-review folder in the mailbox root.
+ */
+async function ensureEscalatedFolder(client) {
+  if (escalatedFolderId) {
+    return { id: escalatedFolderId, displayName: env.emailEscalatedFolderName };
+  }
+
+  const folderName = env.emailEscalatedFolderName;
+  const foldersPath = `/users/${env.msGraphUserId}/mailFolders`;
+
+  const response = await client.api(foldersPath).select('id,displayName').top(200).get();
+  const existing = (response.value || []).find(
+    (f) => f.displayName?.toLowerCase() === folderName.toLowerCase(),
+  );
+
+  if (existing?.id) {
+    escalatedFolderId = existing.id;
+    return existing;
+  }
+
+  const created = await client.api(foldersPath).post({ displayName: folderName });
+  escalatedFolderId = created.id;
+  return created;
+}
+
+async function moveEmailToEscalated(client, messageId, folderId) {
+  const moved = await client
+    .api(`/users/${env.msGraphUserId}/messages/${messageId}/move`)
+    .post({ destinationId: folderId });
+  return moved;
+}
+
+async function markEmailUnread(client, messageId) {
+  try {
+    await client
+      .api(`/users/${env.msGraphUserId}/messages/${messageId}`)
+      .patch({ isRead: false });
+  } catch (error) {
+    logger.warn(`Could not mark email as unread: ${error.message}`, { messageId });
+  }
+}
+
+/**
+ * Move an unresolved email to the Escalated folder and leave it unread for humans.
+ */
+async function routeEmailToHumanQueue(client, messageId, { subject, reason } = {}) {
+  const folder = await ensureEscalatedFolder(client);
+  if (!folder?.id) {
+    logger.error('Cannot route email to human queue — Escalated folder unavailable', {
+      messageId,
+      subject,
+      reason,
+    });
+    return null;
+  }
+
+  trackProcessedMessage(messageId);
+
+  const moved = await moveEmailToEscalated(client, messageId, folder.id);
+  const newMessageId = moved?.id || messageId;
+
+  if (newMessageId !== messageId) {
+    trackProcessedMessage(newMessageId);
+  }
+
+  await markEmailUnread(client, newMessageId);
+
+  logger.info(`Email routed to "${env.emailEscalatedFolderName}" folder (unread)`, {
+    originalMessageId: messageId,
+    messageId: newMessageId,
+    subject,
+    reason,
+    folderId: folder.id,
+  });
+
+  return newMessageId;
+}
+
+function emailNeedsHumanFollowUp(agentResult, escalationCheck) {
+  if (escalationCheck?.shouldEscalate) {
+    return { needsHuman: true, reason: escalationCheck.reason || 'auto_escalation' };
+  }
+
+  if (agentResult?.metadata?.needsHumanFollowUp) {
+    return { needsHuman: true, reason: 'agent_escalation' };
+  }
+
+  if (agentResult?.metadata?.error) {
+    return { needsHuman: true, reason: 'agent_error' };
+  }
+
+  const tools = agentResult?.toolsUsed || [];
+  if (tools.some((t) => t.name === 'createEscalationTicket')) {
+    return { needsHuman: true, reason: 'escalation_ticket' };
+  }
+
+  return { needsHuman: false };
 }
 
 function stripHtml(html) {
@@ -523,25 +638,11 @@ async function processInboundEmail(client, msg, sentMessages = [], { force = fal
 
   const escalationCheck = shouldAutoEscalate(sessionId);
   if (escalationCheck.shouldEscalate) {
-    const fallback = formatResponse(
-      'Thanks for bearing with me on this one. I have passed your message to a colleague on our team who will pick this up and get back to you by email within 24 hours.',
-      CHANNELS.EMAIL,
-      {
-        subject: subject.startsWith('Re:') ? subject : `Re: ${subject}`,
-        customerName: senderName,
-        storeName: env.storeName,
-        agentName: env.emailAgentSignoffName,
-      },
-    );
-    await sendEmailReply(client, msg.id, fallback.html);
-    sentMessages.push({
-      conversationId: msg.conversationId,
-      sentDateTime: new Date().toISOString(),
-      from: { emailAddress: { address: env.msGraphUserId } },
+    await routeEmailToHumanQueue(client, msg.id, {
+      subject,
+      reason: escalationCheck.reason || 'auto_escalation',
     });
-    await markEmailAsRead(client, msg.id);
-    trackProcessedMessage(msg.id);
-    return { replied: true, reason: 'escalated' };
+    return { replied: false, reason: 'escalated_to_folder', escalated: true };
   }
 
   const history = getHistory(sessionId);
@@ -570,6 +671,15 @@ async function processInboundEmail(client, msg, sentMessages = [], { force = fal
 
   addToHistory(sessionId, agentResult.conversationUpdate);
   recordToolUsage(sessionId, agentResult.toolsUsed?.length || 0);
+
+  const humanCheck = emailNeedsHumanFollowUp(agentResult, escalationCheck);
+  if (humanCheck.needsHuman) {
+    await routeEmailToHumanQueue(client, msg.id, {
+      subject,
+      reason: humanCheck.reason,
+    });
+    return { replied: false, reason: humanCheck.reason, escalated: true };
+  }
 
   const formatted = formatResponse(agentResult.response, CHANNELS.EMAIL, {
     subject: subject.startsWith('Re:') ? subject : `Re: ${subject}`,
@@ -635,6 +745,16 @@ export async function pollEmails() {
           messageId: msg.id,
           stack: error.stack,
         });
+        try {
+          await routeEmailToHumanQueue(client, msg.id, {
+            subject: msg.subject,
+            reason: `processing_error: ${error.message}`,
+          });
+        } catch (routeError) {
+          logger.error(`Failed to route email to Escalated folder: ${routeError.message}`, {
+            messageId: msg.id,
+          });
+        }
       }
     }
   } catch (error) {
@@ -711,6 +831,7 @@ export async function replyToSpecificEmail({ fromEmail, subjectContains, force =
   const result = await processInboundEmail(client, msg, sentMessages, { force });
   return {
     replied: Boolean(result?.replied),
+    escalated: Boolean(result?.escalated),
     reason: result?.reason,
     subject: msg.subject,
     messageId: msg.id,

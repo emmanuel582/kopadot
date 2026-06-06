@@ -79,14 +79,20 @@ const server = createServer(app);
 // Attach WebSocket live chat
 attachLiveChat(server);
 
-// Start polling for Microsoft 365 emails (paused until EMAIL_POLLING_ENABLED=true)
+// Start polling for Microsoft 365 emails (set EMAIL_POLLING_ENABLED=true on Render)
 if (!env.emailPollingEnabled) {
-  logger.info('Microsoft 365 email polling is PAUSED. Set EMAIL_POLLING_ENABLED=true to resume after Mail.ReadWrite is approved.');
+  logger.info('Microsoft 365 email polling is PAUSED. Set EMAIL_POLLING_ENABLED=true on Render to start inbox polling.');
 } else if (env.msGraphTenantId && env.msGraphClientId && env.msGraphClientSecret && env.msGraphUserId) {
   verifyGraphConnection()
     .then((result) => {
       if (result.ok) {
+        logger.info('Microsoft 365 email polling starting', {
+          intervalMinutes: env.emailPollIntervalMs / 60000,
+          escalatedFolder: env.emailEscalatedFolderName,
+        });
         startEmailPolling(env.emailPollIntervalMs);
+      } else {
+        logger.error('Microsoft 365 email polling not started', { reason: result.reason });
       }
     })
     .catch((error) => {

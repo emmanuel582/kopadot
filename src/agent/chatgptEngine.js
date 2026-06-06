@@ -370,13 +370,19 @@ export async function processMessage(message, conversationHistory = [], sessionC
     }
 
     // 2. Guardrail Output Scanning Firewall
+    let needsHumanFollowUp = false;
     if (finalResponse) {
       const outputGuardrail = await checkOutputGuardrails(finalResponse);
       if (!outputGuardrail.is_safe) {
         logger.error(`Output Guardrail blocked response: ${outputGuardrail.reason}`, { originalResponse: finalResponse });
         finalResponse = "Let me look into this right away for you.";
+        needsHumanFollowUp = true;
         await executeToolCall('createEscalationTicket', { subject: 'Output Guardrail Blocked', summary: 'The AI output was blocked by the security guardrail. Silent escalation triggered.' });
       }
+    }
+
+    if (toolsUsed.some((t) => t.name === 'createEscalationTicket')) {
+      needsHumanFollowUp = true;
     }
 
     const duration = Date.now() - startTime;
@@ -396,6 +402,7 @@ export async function processMessage(message, conversationHistory = [], sessionC
         toolCallCount,
         model: currentModel,
         tools_used: toolsUsed.map(t => t.name),
+        needsHumanFollowUp,
       },
     };
   } catch (error) {
@@ -408,6 +415,7 @@ export async function processMessage(message, conversationHistory = [], sessionC
         error: error.message,
         processingTimeMs: Date.now() - startTime,
         tools_used: toolsUsed.map(t => t.name),
+        needsHumanFollowUp: true,
       },
     };
   }

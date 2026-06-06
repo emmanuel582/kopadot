@@ -287,50 +287,42 @@ async function fetchMessagePage(client, requestBuilder, maxMessages) {
 }
 
 /**
- * Fetch inbox candidates: prioritises unread mail from the last 6 hours,
- * then other unread mail, then the wider lookback window.
+ * Fetch inbox candidates — unread only, so replied/read mail is never re-fetched.
  */
 async function fetchCandidateMessages(client) {
   const inbox = `/users/${env.msGraphUserId}/mailFolders/inbox/messages`;
   const cap = env.emailMaxPerPoll;
   const sinceIso = getLookbackSinceIso();
 
-  const [priorityRecent, unread, lookback] = await Promise.all([
+  const [unreadInLookback, staleUnread] = await Promise.all([
     fetchMessagePage(
       client,
-      client.api(inbox).select(MESSAGE_SELECT).top(40),
-      40,
+      client
+        .api(inbox)
+        .filter(`isRead eq false and receivedDateTime ge ${sinceIso}`)
+        .select(MESSAGE_SELECT)
+        .orderby('receivedDateTime asc')
+        .top(cap),
+      cap,
     ),
     fetchMessagePage(
       client,
-      client.api(inbox).filter('isRead eq false').select(MESSAGE_SELECT).top(15),
-      15,
-    ),
-    fetchMessagePage(
-      client,
-      client.api(inbox).filter(`receivedDateTime ge ${sinceIso}`).select(MESSAGE_SELECT).top(20),
-      20,
+      client
+        .api(inbox)
+        .filter('isRead eq false')
+        .select(MESSAGE_SELECT)
+        .orderby('receivedDateTime asc')
+        .top(10),
+      10,
     ),
   ]);
 
-  const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
-  const priorityRecentFiltered = priorityRecent.filter(
-    (m) => !m.isRead && new Date(m.receivedDateTime).getTime() >= sixHoursAgo,
-  );
-  const priorityIds = new Set(priorityRecentFiltered.map((m) => m.id));
   const byId = new Map();
-
-  for (const msg of priorityRecentFiltered) byId.set(msg.id, msg);
-  for (const msg of unread) if (!byId.has(msg.id)) byId.set(msg.id, msg);
-  for (const msg of lookback) if (!byId.has(msg.id)) byId.set(msg.id, msg);
+  for (const msg of unreadInLookback) byId.set(msg.id, msg);
+  for (const msg of staleUnread) if (!byId.has(msg.id)) byId.set(msg.id, msg);
 
   return [...byId.values()]
-    .sort((a, b) => {
-      const aPriority = priorityIds.has(a.id) ? 0 : 1;
-      const bPriority = priorityIds.has(b.id) ? 0 : 1;
-      if (aPriority !== bPriority) return aPriority - bPriority;
-      return new Date(a.receivedDateTime) - new Date(b.receivedDateTime);
-    })
+    .sort((a, b) => new Date(a.receivedDateTime) - new Date(b.receivedDateTime))
     .slice(0, cap);
 }
 
@@ -520,6 +512,7 @@ async function processInboundEmail(client, msg, sentMessages = [], { force = fal
 
   logger.info(`Email needs support reply: "${subject}" from ${senderEmail || 'unknown'}`);
 
+  // In-flight lock before expensive AI work — prevents duplicate agent runs in overlapping polls.
   processingMessageIds.add(msg.id);
   try {
     return await processSupportEmail(client, msg, sentMessages, {
@@ -617,6 +610,10 @@ async function processSupportEmail(client, msg, sentMessages, {
   // Graph /reply always goes back to the sender of this specific message — never a random address.
   await sendEmailReply(client, msg.id, formatted.html);
 
+  // Mark read immediately after send so the next poll never re-fetches this message.
+  await markEmailAsRead(client, msg.id);
+  trackProcessedMessage(msg.id);
+
   if (humanCheck.needsHuman && humanCheck.stillSendReply) {
     await routeEmailToHumanQueue(client, msg.id, {
       subject,
@@ -642,8 +639,6 @@ async function processSupportEmail(client, msg, sentMessages, {
     processingTimeMs: agentResult.metadata?.processingTimeMs,
   });
 
-  await markEmailAsRead(client, msg.id);
-  trackProcessedMessage(msg.id);
   return { replied: true, reason: 'support_reply' };
 }
 
@@ -677,8 +672,11 @@ export async function pollEmails() {
 
     const toProcess = [];
     for (const msg of messages) {
-      if (processedMessageIds.has(msg.id)) continue;
-      if (wasAlreadyRepliedTo(msg, sentMessages)) {
+      if (processedMessageIds.has(msg.id)) {
+        await skipHandledEmail(client, msg, 'already_processed_prefilter');
+        continue;
+      }
+      if (wasAlreadyRepliedTo(msg, sentMessages) || await hasReplyInConversation(client, msg)) {
         logger.debug(`Pre-filter skip (already replied): "${msg.subject}"`, { messageId: msg.id });
         await skipHandledEmail(client, msg, 'already_replied_prefilter');
         continue;
@@ -694,6 +692,7 @@ export async function pollEmails() {
           messageId: msg.id,
           stack: error.stack,
         });
+        processedMessageIds.delete(msg.id);
         try {
           await routeEmailToHumanQueue(client, msg.id, {
             subject: msg.subject,

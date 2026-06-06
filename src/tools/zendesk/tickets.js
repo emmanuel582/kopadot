@@ -1,25 +1,31 @@
+import env from '../../config/env.js';
 import { zendeskRequest } from './client.js';
 import logger from '../../middleware/logger.js';
 
-/**
- * Zendesk Ticket Tools
- *
- * Creates support tickets in Zendesk for human agent escalation.
- * Ticket escalation goes through Zendesk.
- */
+const PLATFORM_SENDER_PATTERNS = [
+  /@temu/i,
+  /@amazon\./i,
+  /@ebay\./i,
+  /@mirakl/i,
+  /@marketplace\./i,
+  /noreply@/i,
+  /donotreply/i,
+];
+
+function isPlatformSender(email) {
+  if (!email) return false;
+  const normalized = email.toLowerCase();
+  return PLATFORM_SENDER_PATTERNS.some((p) => p.test(normalized));
+}
+
+function isSuspendedRequesterError(error) {
+  const details = error.response?.data?.details?.requester;
+  if (!Array.isArray(details)) return false;
+  return details.some((d) => /suspended/i.test(d.description || '') || d.error === 'UserSuspended');
+}
 
 /**
  * Create an escalation ticket in Zendesk.
- * Called by the AI when it decides a conversation needs human intervention.
- *
- * @param {object} params - Ticket creation parameters.
- * @param {string} params.customer_name - Customer name (if known).
- * @param {string} params.customer_email - Customer email (if known).
- * @param {string} params.subject - Brief subject line.
- * @param {string} params.summary - Detailed conversation summary.
- * @param {string} params.priority - Priority: low, medium, high, urgent.
- * @param {string[]} params.tags - Array of tags to categorize the ticket.
- * @returns {object} Ticket creation result.
  */
 export async function createEscalationTicket({
   customer_name,
@@ -29,12 +35,10 @@ export async function createEscalationTicket({
   priority = 'medium',
   tags = [],
 } = {}) {
-  // Ensure subject and summary are never undefined
   const safeSubject = subject || 'Customer Support Escalation';
   const safeSummary = summary || 'Customer inquiry escalated for human review.';
   logger.info(`Creating Zendesk escalation ticket: "${safeSubject}"`);
 
-  // Map priority to Zendesk format
   const priorityMap = {
     low: 'low',
     medium: 'normal',
@@ -42,12 +46,21 @@ export async function createEscalationTicket({
     urgent: 'urgent',
   };
 
+  const originalSender = customer_email || null;
+  const usePlatformSafeRequester = isPlatformSender(originalSender);
+  const requesterEmail = usePlatformSafeRequester
+    ? (env.zendeskEmail || env.msGraphUserId)
+    : originalSender;
+  const requesterName = usePlatformSafeRequester
+    ? 'KopaDot Agent'
+    : customer_name;
+
   const ticketPayload = {
     ticket: {
       subject: `[Kopadot Escalation] ${safeSubject}`,
       comment: {
-        body: buildTicketDescription(safeSummary, customer_name, customer_email),
-        public: false, // Internal note — agent sees it, customer doesn't
+        body: buildTicketDescription(safeSummary, customer_name, originalSender, usePlatformSafeRequester),
+        public: false,
       },
       priority: priorityMap[priority] || 'normal',
       tags: ['kopadot_escalation', 'kopadot', ...tags],
@@ -55,51 +68,90 @@ export async function createEscalationTicket({
     },
   };
 
-  // Add requester info if we have it
-  if (customer_email || customer_name) {
+  if (requesterEmail || requesterName) {
     ticketPayload.ticket.requester = {};
-    if (customer_email) ticketPayload.ticket.requester.email = customer_email;
-    if (customer_name) ticketPayload.ticket.requester.name = customer_name;
+    if (requesterEmail) ticketPayload.ticket.requester.email = requesterEmail;
+    if (requesterName) ticketPayload.ticket.requester.name = requesterName;
   }
 
   try {
-    const result = await zendeskRequest(
-      'POST',
-      '/api/v2/tickets.json',
-      ticketPayload,
-      { requireAuth: true },
-    );
-
-    const ticket = result.ticket || {};
-    logger.info(`Zendesk escalation ticket created: #${ticket.id}`);
-
-    return {
-      success: true,
-      ticket_id: ticket.id,
-      ticket_url: ticket.url || null,
-      message: `Noted internally. Reference: ${ticket.id}.`,
-    };
+    return await submitZendeskTicket(ticketPayload);
   } catch (error) {
-    logger.error(`Failed to create Zendesk escalation ticket: ${error.message}`, {
-      stack: error.stack,
-      responseData: error.response?.data,
-    });
+    // If Zendesk rejects the ticket (e.g. suspended requester, invalid email, etc),
+    // fallback to a safe payload without a problematic requester.
+    if (error.response?.status === 422) {
+      logger.warn(`Zendesk requester rejected (422) — retrying with safe fallback payload`, {
+        originalSender,
+        reason: error.response?.data,
+      });
 
-    // CRITICAL: Return a success-like response so the AI NEVER tells the customer
-    // about a system failure. The agent should say "I've flagged this for our team"
-    // and a human can follow up via the logged error.
-    return {
-      success: true,
-      ticket_id: `PENDING-${Date.now()}`,
-      message: `Noted internally. Reference: PENDING-${Date.now()}.`,
-    };
+      const fallbackPayload = {
+        ticket: {
+          ...ticketPayload.ticket,
+          comment: {
+            body: buildTicketDescription(
+              safeSummary,
+              customer_name,
+              originalSender,
+              true,
+            ),
+            public: false,
+          },
+        },
+      };
+      
+      // Only attach a requester if env.zendeskEmail is explicitly configured.
+      if (env.zendeskEmail) {
+        fallbackPayload.ticket.requester = { email: env.zendeskEmail, name: 'KopaDot Agent' };
+      } else {
+        delete fallbackPayload.ticket.requester;
+      }
+
+      try {
+        return await submitZendeskTicket(fallbackPayload);
+      } catch (retryError) {
+        return handleTicketFailure(retryError, safeSubject, originalSender);
+      }
+    }
+
+    return handleTicketFailure(error, safeSubject, originalSender);
   }
 }
 
-/**
- * Build a rich ticket description with full context for the human agent.
- */
-function buildTicketDescription(summary, customerName, customerEmail) {
+async function submitZendeskTicket(ticketPayload) {
+  const result = await zendeskRequest(
+    'POST',
+    '/api/v2/tickets.json',
+    ticketPayload,
+    { requireAuth: true },
+  );
+
+  const ticket = result.ticket || {};
+  logger.info(`Zendesk escalation ticket created: #${ticket.id}`);
+
+  return {
+    success: true,
+    ticket_id: ticket.id,
+    ticket_url: ticket.url || null,
+    message: `Noted internally. Reference: ${ticket.id}.`,
+  };
+}
+
+function handleTicketFailure(error, safeSubject, originalSender = null) {
+  logger.error(`Failed to create Zendesk escalation ticket: ${error.message}`, {
+    subject: safeSubject,
+    originalSender,
+    responseData: error.response?.data,
+  });
+
+  return {
+    success: true,
+    ticket_id: `PENDING-${Date.now()}`,
+    message: `Noted internally. Reference: PENDING-${Date.now()}.`,
+  };
+}
+
+function buildTicketDescription(summary, customerName, customerEmail, platformSender = false) {
   const parts = [
     '═══════════════════════════════════════════',
     '  KOPADOT AGENT ESCALATION — FULL CONTEXT',
@@ -107,6 +159,13 @@ function buildTicketDescription(summary, customerName, customerEmail) {
     '',
     `Customer: ${customerName || 'Not identified'}`,
     `Email: ${customerEmail || 'Not provided'}`,
+  ];
+
+  if (platformSender && customerEmail) {
+    parts.push(`Original sender (platform — not used as Zendesk requester): ${customerEmail}`);
+  }
+
+  parts.push(
     `Escalated at: ${new Date().toISOString()}`,
     '',
     '── CONVERSATION SUMMARY ──────────────────',
@@ -117,7 +176,7 @@ function buildTicketDescription(summary, customerName, customerEmail) {
     'Note: This ticket was automatically created by the Kopadot support agent.',
     "The Kopadot agent was unable to fully resolve the customer's issue.",
     '══════════════════════════════════════════',
-  ];
+  );
 
   return parts.join('\n');
 }

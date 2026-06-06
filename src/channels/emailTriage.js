@@ -17,6 +17,11 @@ const AUTOMATED_SENDER_PATTERNS = [
   /newsletter@/i,
   /marketing@/i,
   /promo(tions?)?@/i,
+  /seller@/i,
+  /orders?@.*temu/i,
+  /@messaging\.ebay/i,
+  /vendor@/i,
+  /@sell\.amazon/i,
 ];
 
 const INTERNAL_NOTIFICATION_PATTERNS = [
@@ -38,6 +43,30 @@ const PLATFORM_SENDER_DOMAINS = [
   '@comms.walmart.com',
   '@sellercentral',
   '@messaging.ebay',
+  '@temu',
+  '@temuemail',
+  '@orders.temu',
+  '@roblox.com',
+  '@mirakl.net',
+  '@notification.mirakl',
+  '@shipping.temuemail',
+];
+
+const SECURITY_NOTIFICATION_SUBJECT_PATTERNS = [
+  /2[- ]step verification/i,
+  /password reset/i,
+  /authenticator (app|activated|enabled)/i,
+  /security alert/i,
+  /verify your (email|account)/i,
+];
+
+const VENDOR_SUBJECT_PATTERNS = [
+  /pricelist/i,
+  /price\s*list/i,
+  /\bdistributor\b/i,
+  /trade account/i,
+  /mobile accessories distributor/i,
+  /wkd distribution/i,
 ];
 
 const MARKETING_SENDER_PATTERNS = [
@@ -90,6 +119,10 @@ const MARKETING_SUBJECT_PATTERNS = [
   /order\(s\) about to be late/i,
   /successfully cancelled an order/i,
   /buyer wants to cancel/i,
+  /statement summary is ready/i,
+  /you have products with unappealing/i,
+  /seller center/i,
+  /ship now/i,
   /statement summary is ready/i,
   /new device is using your account/i,
   /has shipped your sold item/i,
@@ -279,6 +312,15 @@ function runLayer1HardDeny({ senderEmail, subject, bodyPreview, headers, ownMail
     return { skip: true, reason: 'internal_system_notification', confidence: 1 };
   }
 
+  if (SECURITY_NOTIFICATION_SUBJECT_PATTERNS.some((p) => p.test(subject))) {
+    return { skip: true, reason: 'security_notification_subject', confidence: 1 };
+  }
+
+  if (VENDOR_SUBJECT_PATTERNS.some((p) => p.test(subject))
+    && !/\border\s*#?\d{4,}\b/i.test(combined)) {
+    return { skip: true, reason: 'vendor_outreach_subject', confidence: 0.95 };
+  }
+
   // Bulk headers (List-Unsubscribe etc.) are scored in Layer 2 so real customer
   // mail from ESP-backed senders is not hard-blocked before content is weighed.
 
@@ -385,7 +427,7 @@ async function runLayer3GptClassify(input, scores) {
           content: `You gate emails for ${env.storeName} customer support. Real customers use personal AND company email domains.
 
 Reply YES only if a person needs help from the store: orders, delivery, refunds, returns, product issues, payments, account help.
-Reply NO for: marketing, newsletters, marketplace seller alerts, supplier/WTS offers, platform notifications, spam, auto-replies, vendor outreach.
+Reply NO for: marketing, newsletters, marketplace seller alerts, supplier/WTS offers, platform notifications, spam, auto-replies, vendor outreach, B2B distributors, pricelists, security/account emails from third-party platforms (Roblox, Temu, etc.).
 
 When unsure, reply YES — never miss a real customer.
 
@@ -398,6 +440,7 @@ JSON only: {"needs_response":true/false,"confidence":0.0-1.0,"reason":"brief"}`,
             `Subject: ${input.subject || '(no subject)'}`,
             `Preview: ${preview}`,
             `Heuristic hints: customer=${scores.customerScore}, marketing=${scores.marketingScore}`,
+            `CRITICAL RULE: If the email is from a marketplace like Temu, Amazon, eBay, or is a vendor/seller alert, you MUST output needs_response: false.`,
           ].join('\n'),
         },
       ],
@@ -444,6 +487,63 @@ JSON only: {"needs_response":true/false,"confidence":0.0-1.0,"reason":"brief"}`,
  *   Layer 2 — weighted signal scoring                              next ~20-25%, $0
  *   Layer 3 — lightweight GPT on ambiguous only                    ~5-15% of inbox, ~300 tokens each
  */
+/**
+ * Fast triage for backlog drain — Layers 1–2 only, no GPT tokens.
+ * Ambiguous mail is treated as skip (mark read). Strong customer signals still pass through.
+ */
+export function triageInboundEmailFast(input, { ownMailbox = '' } = {}) {
+  const headers = input.headers instanceof Map
+    ? input.headers
+    : parseEmailHeaders(input.internetMessageHeaders || []);
+
+  const normalized = {
+    senderEmail: input.senderEmail || null,
+    senderName: input.senderName || null,
+    subject: input.subject || '(no subject)',
+    bodyPreview: input.bodyPreview || '',
+    plainBody: input.plainBody || '',
+    headers,
+  };
+
+  const layer1 = runLayer1HardDeny({ ...normalized, ownMailbox });
+  if (layer1) {
+    return {
+      shouldRespond: false,
+      layer: 1,
+      reason: layer1.reason,
+      confidence: layer1.confidence,
+      gptUsed: false,
+    };
+  }
+
+  const layer2 = runLayer2SignalScoring(normalized);
+  if (!layer2.ambiguous) {
+    return { ...layer2, gptUsed: false };
+  }
+
+  if (layer2.customerScore >= CUSTOMER_SCORE_SOFT_REPLY) {
+    return {
+      shouldRespond: true,
+      layer: 2,
+      reason: 'backlog_customer_signals_need_review',
+      confidence: 0.8,
+      gptUsed: false,
+      customerScore: layer2.customerScore,
+      marketingScore: layer2.marketingScore,
+    };
+  }
+
+  return {
+    shouldRespond: false,
+    layer: 2,
+    reason: 'backlog_ambiguous_skip',
+    confidence: 0.7,
+    gptUsed: false,
+    customerScore: layer2.customerScore,
+    marketingScore: layer2.marketingScore,
+  };
+}
+
 export async function triageInboundEmail(input, { ownMailbox = '' } = {}) {
   const headers = input.headers instanceof Map
     ? input.headers
@@ -479,5 +579,6 @@ export async function triageInboundEmail(input, { ownMailbox = '' } = {}) {
 
 export default {
   triageInboundEmail,
+  triageInboundEmailFast,
   parseEmailHeaders,
 };

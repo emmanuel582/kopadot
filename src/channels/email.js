@@ -14,11 +14,12 @@ import {
 } from '../agent/conversationMgr.js';
 import { shouldAutoEscalate } from '../agent/escalation.js';
 import { formatResponse } from '../utils/responseFormatter.js';
-import { triageInboundEmail } from './emailTriage.js';
+import { triageInboundEmail, triageInboundEmailFast } from './emailTriage.js';
 
 let graphClient = null;
 let isPolling = false;
 let escalatedFolderId = null;
+let backlogDrainComplete = false;
 const processedMessageIds = new Set();
 const processingMessageIds = new Set();
 const MAX_PROCESSED_IDS = 5000;
@@ -29,6 +30,11 @@ function getOwnMailbox() {
 
 function getLookbackSinceIso() {
   const since = Date.now() - env.emailLookbackHours * 60 * 60 * 1000;
+  return new Date(since).toISOString();
+}
+
+function getPrioritySinceIso() {
+  const since = Date.now() - env.emailPriorityHours * 60 * 60 * 1000;
   return new Date(since).toISOString();
 }
 
@@ -95,10 +101,12 @@ export async function verifyGraphConnection() {
     return { ok: false, reason: 'missing_credentials', missing };
   }
 
-  logger.info('Microsoft Graph config loaded', {
+    logger.info('Microsoft Graph config loaded', {
     mailbox: config.mailbox,
     pollIntervalMinutes: env.emailPollIntervalMs / 60000,
+    priorityHours: env.emailPriorityHours,
     lookbackHours: env.emailLookbackHours,
+    backlogDrainPerPoll: env.emailBacklogDrainPerPoll,
   });
 
   const client = getGraphClient();
@@ -287,43 +295,103 @@ async function fetchMessagePage(client, requestBuilder, maxMessages) {
 }
 
 /**
- * Fetch inbox candidates — unread only, so replied/read mail is never re-fetched.
+ * Recent unread customer candidates — newest first within the priority window.
  */
-async function fetchCandidateMessages(client) {
+async function fetchRecentCustomerMessages(client) {
   const inbox = `/users/${env.msGraphUserId}/mailFolders/inbox/messages`;
-  const cap = env.emailMaxPerPoll;
-  const sinceIso = getLookbackSinceIso();
+  const sinceIso = getPrioritySinceIso();
 
-  const [unreadInLookback, staleUnread] = await Promise.all([
-    fetchMessagePage(
-      client,
-      client
-        .api(inbox)
-        .filter(`isRead eq false and receivedDateTime ge ${sinceIso}`)
-        .select(MESSAGE_SELECT)
-        .orderby('receivedDateTime asc')
-        .top(cap),
-      cap,
-    ),
-    fetchMessagePage(
-      client,
-      client
-        .api(inbox)
-        .filter('isRead eq false')
-        .select(MESSAGE_SELECT)
-        .orderby('receivedDateTime asc')
-        .top(10),
-      10,
-    ),
-  ]);
+  const messages = await fetchMessagePage(
+    client,
+    client
+      .api(inbox)
+      .filter(`isRead eq false and receivedDateTime ge ${sinceIso}`)
+      .select(MESSAGE_SELECT)
+      .orderby('receivedDateTime desc')
+      .top(env.emailMaxPerPoll),
+    env.emailMaxPerPoll,
+  );
 
-  const byId = new Map();
-  for (const msg of unreadInLookback) byId.set(msg.id, msg);
-  for (const msg of staleUnread) if (!byId.has(msg.id)) byId.set(msg.id, msg);
+  return messages;
+}
 
-  return [...byId.values()]
-    .sort((a, b) => new Date(a.receivedDateTime) - new Date(b.receivedDateTime))
-    .slice(0, cap);
+/**
+ * Old unread backlog — received before the priority window, oldest first for drain.
+ */
+async function fetchBacklogUnread(client, limit) {
+  const inbox = `/users/${env.msGraphUserId}/mailFolders/inbox/messages`;
+  const priorityCutoff = getPrioritySinceIso();
+
+  const messages = await fetchMessagePage(
+    client,
+    client
+      .api(inbox)
+      .filter(`isRead eq false and receivedDateTime lt ${priorityCutoff}`)
+      .select(MESSAGE_SELECT)
+      .orderby('receivedDateTime asc')
+      .top(limit),
+    limit,
+  );
+
+  return messages;
+}
+
+function buildTriageInput(msg) {
+  return {
+    senderEmail: msg.from?.emailAddress?.address || null,
+    senderName: msg.from?.emailAddress?.name || null,
+    subject: msg.subject || '(no subject)',
+    bodyPreview: msg.bodyPreview || '',
+    plainBody: stripHtml(msg.body?.content) || msg.bodyPreview || '',
+    internetMessageHeaders: msg.internetMessageHeaders,
+  };
+}
+
+/**
+ * Mark-read old noise without GPT. Strong customer signals in backlog are kept for processing.
+ */
+async function drainInboxBacklog(client, { aggressive = false } = {}) {
+  const limit = aggressive ? 200 : env.emailBacklogDrainPerPoll;
+  const batch = await fetchBacklogUnread(client, limit);
+  if (batch.length === 0) {
+    backlogDrainComplete = true;
+    return { drained: 0, kept: 0, remaining: false };
+  }
+
+  let drained = 0;
+  let kept = 0;
+
+  for (const msg of batch) {
+    const triage = triageInboundEmailFast(buildTriageInput(msg), { ownMailbox: getOwnMailbox() });
+
+    if (triage.shouldRespond) {
+      kept += 1;
+      logger.info(`Backlog kept for processing (customer signals): "${msg.subject}"`, {
+        messageId: msg.id,
+        reason: triage.reason,
+        customerScore: triage.customerScore,
+      });
+      continue;
+    }
+
+    const readOk = await markEmailAsRead(client, msg.id);
+    trackProcessedMessage(msg.id);
+    drained += 1;
+    logger.debug(`Backlog drained (mark read): "${msg.subject}" — ${triage.reason}`, {
+      messageId: msg.id,
+      markReadOk: readOk,
+    });
+  }
+
+  const remaining = batch.length >= limit;
+  if (!remaining) backlogDrainComplete = true;
+
+  logger.info(`Inbox backlog drain: ${drained} marked read, ${kept} kept, batch=${batch.length}`, {
+    aggressive,
+    backlogDrainComplete,
+  });
+
+  return { drained, kept, remaining };
 }
 
 /**
@@ -421,6 +489,9 @@ async function hasReplyInConversation(client, inboundMsg) {
 async function skipHandledEmail(client, msg, reason) {
   trackProcessedMessage(msg.id);
   await markEmailAsRead(client, msg.id);
+  if (msg.conversationId) {
+    await markConversationAsRead(client, msg.conversationId);
+  }
   return { replied: false, reason };
 }
 
@@ -429,12 +500,42 @@ async function markEmailAsRead(client, messageId) {
     await client
       .api(`/users/${env.msGraphUserId}/messages/${messageId}`)
       .patch({ isRead: true });
+    return true;
   } catch (error) {
-    // PATCH requires Mail.ReadWrite; read + reply only need Mail.Read + Mail.Send.
     logger.warn(`Could not mark email as read: ${error.message}`, {
       messageId,
       hint: 'Grant Mail.ReadWrite application permission in Azure AD and re-consent',
     });
+    return false;
+  }
+}
+
+/**
+ * Mark every unread message in a conversation read (handles multi-message threads).
+ */
+async function markConversationAsRead(client, conversationId) {
+  if (!conversationId) return 0;
+
+  try {
+    const response = await client
+      .api(`/users/${env.msGraphUserId}/messages`)
+      .filter(`conversationId eq '${conversationId}' and isRead eq false`)
+      .select('id')
+      .top(25)
+      .get();
+
+    const unread = response.value || [];
+    let marked = 0;
+    for (const message of unread) {
+      if (await markEmailAsRead(client, message.id)) {
+        trackProcessedMessage(message.id);
+        marked += 1;
+      }
+    }
+    return marked;
+  } catch (error) {
+    logger.warn(`Could not mark conversation as read: ${error.message}`, { conversationId });
+    return 0;
   }
 }
 
@@ -455,12 +556,14 @@ async function sendEmailReply(client, messageId, htmlContent) {
  * Process a single inbound email through the AI agent and reply if appropriate.
  */
 async function processInboundEmail(client, msg, sentMessages = [], { force = false } = {}) {
-  if (processingMessageIds.has(msg.id) || processedMessageIds.has(msg.id)) {
-    logger.debug(`Skipping already-processed email: ${msg.id}`);
+  const senderEmail = msg.from?.emailAddress?.address || null;
+  const lockKey = msg.conversationId || senderEmail || msg.id;
+
+  if (processingMessageIds.has(lockKey) || processedMessageIds.has(msg.id)) {
+    logger.debug(`Skipping already-processing/processed email: ${msg.id}`);
     return skipHandledEmail(client, msg, 'already_processed');
   }
 
-  const senderEmail = msg.from?.emailAddress?.address || null;
   const senderName = msg.from?.emailAddress?.name || null;
   const subject = msg.subject || '(no subject)';
   const bodyPreview = msg.bodyPreview || '';
@@ -500,6 +603,7 @@ async function processInboundEmail(client, msg, sentMessages = [], { force = fal
     });
     await markEmailAsRead(client, msg.id);
     trackProcessedMessage(msg.id);
+    await markConversationAsRead(client, msg.conversationId);
     return { replied: false, reason: triage.reason, triage };
   }
 
@@ -513,7 +617,7 @@ async function processInboundEmail(client, msg, sentMessages = [], { force = fal
   logger.info(`Email needs support reply: "${subject}" from ${senderEmail || 'unknown'}`);
 
   // In-flight lock before expensive AI work — prevents duplicate agent runs in overlapping polls.
-  processingMessageIds.add(msg.id);
+  processingMessageIds.add(lockKey);
   try {
     return await processSupportEmail(client, msg, sentMessages, {
       senderEmail,
@@ -523,7 +627,7 @@ async function processInboundEmail(client, msg, sentMessages = [], { force = fal
       force,
     });
   } finally {
-    processingMessageIds.delete(msg.id);
+    processingMessageIds.delete(lockKey);
   }
 }
 
@@ -610,9 +714,16 @@ async function processSupportEmail(client, msg, sentMessages, {
   // Graph /reply always goes back to the sender of this specific message — never a random address.
   await sendEmailReply(client, msg.id, formatted.html);
 
-  // Mark read immediately after send so the next poll never re-fetches this message.
+  // Mark entire conversation read so the next poll never re-fetches thread messages.
   await markEmailAsRead(client, msg.id);
   trackProcessedMessage(msg.id);
+  const threadMarked = await markConversationAsRead(client, msg.conversationId);
+  if (threadMarked > 1) {
+    logger.debug(`Marked ${threadMarked} unread messages read in conversation`, {
+      conversationId: msg.conversationId,
+      subject,
+    });
+  }
 
   if (humanCheck.needsHuman && humanCheck.stillSendReply) {
     await routeEmailToHumanQueue(client, msg.id, {
@@ -658,17 +769,41 @@ export async function pollEmails() {
 
   try {
     logger.debug('Polling Microsoft 365 inbox for customer emails...');
-    const [messages, sentMessages] = await Promise.all([
-      fetchCandidateMessages(client),
+
+    if (!backlogDrainComplete) {
+      await drainInboxBacklog(client, { aggressive: true });
+    } else {
+      await drainInboxBacklog(client, { aggressive: false });
+    }
+
+    const [recentMessages, sentMessages] = await Promise.all([
+      fetchRecentCustomerMessages(client),
       fetchRecentSentMessages(client),
     ]);
 
+    const backlogBatch = await fetchBacklogUnread(client, env.emailBacklogDrainPerPoll);
+    const backlogCustomer = backlogBatch.filter((msg) => {
+      const triage = triageInboundEmailFast(buildTriageInput(msg), { ownMailbox: getOwnMailbox() });
+      return triage.shouldRespond;
+    });
+
+    const byId = new Map();
+    for (const msg of recentMessages) byId.set(msg.id, msg);
+    for (const msg of backlogCustomer) if (!byId.has(msg.id)) byId.set(msg.id, msg);
+
+    const messages = [...byId.values()]
+      .sort((a, b) => new Date(b.receivedDateTime) - new Date(a.receivedDateTime))
+      .slice(0, env.emailMaxPerPoll);
+
     if (messages.length === 0) {
+      logger.debug('No recent unread customer emails in priority window', {
+        priorityHours: env.emailPriorityHours,
+      });
       return;
     }
 
     const unreadCount = messages.filter((m) => !m.isRead).length;
-    logger.info(`Found ${messages.length} candidate email(s) (${unreadCount} unread, lookback ${env.emailLookbackHours}h). Processing...`);
+    logger.info(`Found ${messages.length} recent candidate email(s) (${unreadCount} unread, priority ${env.emailPriorityHours}h, newest first). Processing...`);
 
     const toProcess = [];
     for (const msg of messages) {
@@ -684,26 +819,31 @@ export async function pollEmails() {
       toProcess.push(msg);
     }
 
-    for (const msg of toProcess) {
-      try {
-        await processInboundEmail(client, msg, sentMessages);
-      } catch (error) {
-        logger.error(`Failed to process email "${msg.subject}": ${error.message}`, {
-          messageId: msg.id,
-          stack: error.stack,
-        });
-        processedMessageIds.delete(msg.id);
+    // Process concurrently in chunks of 10 to handle up to 50 emails quickly without rate limiting
+    const chunkSize = 10;
+    for (let i = 0; i < toProcess.length; i += chunkSize) {
+      const chunk = toProcess.slice(i, i + chunkSize);
+      await Promise.all(chunk.map(async (msg) => {
         try {
-          await routeEmailToHumanQueue(client, msg.id, {
-            subject: msg.subject,
-            reason: `processing_error: ${error.message}`,
-          });
-        } catch (routeError) {
-          logger.error(`Failed to route email to Escalated folder: ${routeError.message}`, {
+          await processInboundEmail(client, msg, sentMessages);
+        } catch (error) {
+          logger.error(`Failed to process email "${msg.subject}": ${error.message}`, {
             messageId: msg.id,
+            stack: error.stack,
           });
+          processedMessageIds.delete(msg.id);
+          try {
+            await routeEmailToHumanQueue(client, msg.id, {
+              subject: msg.subject,
+              reason: `processing_error: ${error.message}`,
+            });
+          } catch (routeError) {
+            logger.error(`Failed to route email to Escalated folder: ${routeError.message}`, {
+              messageId: msg.id,
+            });
+          }
         }
-      }
+      }));
     }
   } catch (error) {
     logger.error(`Error polling Microsoft 365 emails: ${error.message}`, { stack: error.stack });
@@ -717,7 +857,11 @@ export async function pollEmails() {
  * @param {number} intervalMs - Polling interval in milliseconds. Default: 3 mins.
  */
 export function startEmailPolling(intervalMs = 3 * 60 * 1000) {
-  logger.info(`Starting Microsoft 365 Email Polling every ${intervalMs / 60000} minutes...`);
+  logger.info(`Starting Microsoft 365 Email Polling every ${intervalMs / 60000} minutes...`, {
+    priorityHours: env.emailPriorityHours,
+    maxPerPoll: env.emailMaxPerPoll,
+    backlogDrainPerPoll: env.emailBacklogDrainPerPoll,
+  });
 
   const runPoll = () => {
     pollEmails().catch((error) => {
@@ -727,6 +871,27 @@ export function startEmailPolling(intervalMs = 3 * 60 * 1000) {
 
   runPoll();
   setInterval(runPoll, intervalMs);
+}
+
+/**
+ * One-shot inbox backlog cleanup — marks old noise read so new customer mail is never starved.
+ */
+export async function drainEmailBacklog({ aggressive = true } = {}) {
+  const client = getGraphClient();
+  if (!client) throw new Error('Graph client not configured');
+
+  let totalDrained = 0;
+  let rounds = 0;
+  const maxRounds = aggressive ? 20 : 1;
+
+  while (rounds < maxRounds) {
+    const result = await drainInboxBacklog(client, { aggressive });
+    totalDrained += result.drained;
+    rounds += 1;
+    if (!result.remaining) break;
+  }
+
+  return { totalDrained, rounds, backlogDrainComplete };
 }
 
 /**
@@ -792,6 +957,7 @@ export async function replyToSpecificEmail({ fromEmail, subjectContains, force =
 export default {
   startEmailPolling,
   pollEmails,
+  drainEmailBacklog,
   processInboundEmail,
   verifyGraphConnection,
   findInboxMessage,

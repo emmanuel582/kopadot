@@ -178,9 +178,39 @@ You are writing ONE email reply to the specific customer who sent this message.
 - Answer their actual question first. Be helpful, not formal for the sake of it.
 - No bullet points, no markdown, no numbered lists, no hyperlinks in [text](url) format — use plain URLs only.
 - NEVER use placeholders like [Your Name], [Name], or [insert name]. End with exactly: "Kind regards," then a new line with "${env.emailAgentSignoffName}".
-- Do NOT add a second team name line after the sign-off. Do NOT write "Looking forward to your reply!" — end cleanly after answering.`;
+- Do NOT add a second team name line after the sign-off. Do NOT write "Looking forward to your reply!" — end cleanly after answering.
+- This is a single email reply, NOT a live chat. NEVER ask "which part would you like me to focus on" or ask the customer to clarify when they already asked multiple questions — answer ALL of them in this one email using your tool results.
+- If you called tools and have the data, write the full answer immediately. Do not defer or ask follow-up questions unless a critical detail is genuinely missing (e.g. no order number at all).`;
   }
   return '';
+}
+
+function getMaxToolCallsForChannel(channel) {
+  if (channel === CHANNELS.EMAIL) {
+    return Math.max(env.maxToolCallsPerTurn, 8);
+  }
+  return env.maxToolCallsPerTurn;
+}
+
+async function synthesizeAnswerFromToolResults(messages, channel) {
+  const isEmail = channel === CHANNELS.EMAIL;
+  const synthesisPrompt = isEmail
+    ? `You have finished calling tools. Write ONE complete email reply to the customer now using ONLY the tool results in this conversation. Answer EVERY question they asked (tracking, payments, policies, stock, returns, exchanges, etc.) in a single cohesive email. Do NOT ask which part to focus on. Do NOT say you gathered information — just give the answers. Plain text only, no markdown.`
+    : `You have finished calling tools. Write a complete reply to the customer now using ONLY the tool results above. Answer every question they asked. Do NOT ask which part to focus on first.`;
+
+  const synthesisMessages = [
+    ...messages,
+    { role: 'user', content: synthesisPrompt },
+  ];
+
+  const response = await openai.chat.completions.create({
+    model: env.openaiModel,
+    messages: synthesisMessages,
+    temperature: 0.3,
+    max_tokens: 2048,
+  });
+
+  return response.choices[0]?.message?.content?.trim() || null;
 }
 
 function convertHistoryToOpenAI(geminiHistory) {
@@ -318,8 +348,9 @@ export async function processMessage(message, conversationHistory = [], sessionC
 
     let finalResponse = null;
     let currentModel = env.openaiModel;
+    const maxToolCalls = getMaxToolCallsForChannel(sessionContext?.channel);
 
-    while (toolCallCount < env.maxToolCallsPerTurn) {
+    while (toolCallCount < maxToolCalls) {
       const response = await openai.chat.completions.create({
         model: currentModel,
         messages: messages,
@@ -364,9 +395,17 @@ export async function processMessage(message, conversationHistory = [], sessionC
       break;
     }
 
-    if (!finalResponse && toolCallCount >= env.maxToolCallsPerTurn) {
-      logger.warn(`Tool call limit reached (${env.maxToolCallsPerTurn}) for this turn`);
-      finalResponse = "I've gathered quite a bit of information for you! Could you please clarify which part you'd like me to focus on first?";
+    if (!finalResponse && toolCallCount > 0) {
+      if (toolCallCount >= maxToolCalls) {
+        logger.warn(`Tool call limit reached (${maxToolCalls}) — synthesizing answer from tool results`);
+      } else {
+        logger.info('No final text after tool loop — synthesizing answer from tool results');
+      }
+      finalResponse = await synthesizeAnswerFromToolResults(messages, sessionContext?.channel);
+    }
+
+    if (!finalResponse) {
+      finalResponse = "I'm here to help! Could you please tell me more about what you need?";
     }
 
     // 2. Guardrail Output Scanning Firewall

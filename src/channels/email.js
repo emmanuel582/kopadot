@@ -108,11 +108,13 @@ export async function verifyGraphConnection() {
   }
 
   try {
+    // Use mail endpoints only (Mail.Read) — avoids User.Read.All which Render tenants may not grant.
     await client
-      .api(`/users/${env.msGraphUserId}`)
-      .select('mail,userPrincipalName')
+      .api(`/users/${env.msGraphUserId}/mailFolders/inbox/messages`)
+      .top(1)
+      .select('id,subject')
       .get();
-    logger.info('Microsoft Graph connection verified — read access OK', { mailbox: config.mailbox });
+    logger.info('Microsoft Graph mailbox read verified', { mailbox: config.mailbox });
 
     const folder = await ensureEscalatedFolder(client);
     if (!folder?.id) {
@@ -131,7 +133,7 @@ export async function verifyGraphConnection() {
   } catch (error) {
     logger.error(`Microsoft Graph connection failed: ${error.message}`, {
       mailbox: config.mailbox,
-      hint: 'Check Azure app permissions (Mail.Read, Mail.Send, Mail.ReadWrite) and admin consent',
+      hint: 'Check Azure app permissions (Mail.Read, Mail.Send, Mail.ReadWrite application permissions) and admin consent. User.Read.All is not required.',
     });
     return { ok: false, reason: error.message };
   }

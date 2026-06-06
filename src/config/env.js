@@ -1,6 +1,19 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+/** Strip whitespace and wrapping quotes — common on Render env var paste. */
+function sanitizeEnv(value) {
+  if (value == null || typeof value !== 'string') return value;
+  let cleaned = value.trim();
+  if (
+    (cleaned.startsWith('"') && cleaned.endsWith('"'))
+    || (cleaned.startsWith("'") && cleaned.endsWith("'"))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  return cleaned;
+}
+
 /**
  * Centralised environment configuration.
  * Every external value the app needs is validated and exported from here.
@@ -39,16 +52,16 @@ const env = {
   zendeskWebhookSecret: process.env.ZENDESK_WEBHOOK_SECRET || null,
 
   // Microsoft 365 / Graph API
-  msGraphTenantId: process.env.MS_GRAPH_TENANT_ID,
-  msGraphClientId: process.env.MS_GRAPH_CLIENT_ID,
-  msGraphClientSecret: process.env.MS_GRAPH_CLIENT_SECRET,
-  msGraphUserId: process.env.MS_GRAPH_USER_ID,
+  msGraphTenantId: sanitizeEnv(process.env.MS_GRAPH_TENANT_ID),
+  msGraphClientId: sanitizeEnv(process.env.MS_GRAPH_CLIENT_ID),
+  msGraphClientSecret: sanitizeEnv(process.env.MS_GRAPH_CLIENT_SECRET),
+  msGraphUserId: sanitizeEnv(process.env.MS_GRAPH_USER_ID),
   emailPollIntervalMs: parseInt(process.env.EMAIL_POLL_INTERVAL_MS || '180000', 10),
   emailLookbackHours: parseInt(process.env.EMAIL_LOOKBACK_HOURS || '48', 10),
   emailMaxPerPoll: parseInt(process.env.EMAIL_MAX_PER_POLL || '30', 10),
   // Set EMAIL_POLLING_ENABLED=true on Render to start inbox polling (requires Mail.ReadWrite).
   emailPollingEnabled: process.env.EMAIL_POLLING_ENABLED === 'true',
-  emailAgentSignoffName: process.env.EMAIL_AGENT_SIGNOFF_NAME || 'The KopaDot Support Team',
+  emailAgentSignoffName: sanitizeEnv(process.env.EMAIL_AGENT_SIGNOFF_NAME) || 'The KopaDot Support Team',
   emailEscalatedFolderName: process.env.EMAIL_ESCALATED_FOLDER_NAME || 'Escalated',
 
   // Store

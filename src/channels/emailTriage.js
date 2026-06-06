@@ -22,6 +22,7 @@ const AUTOMATED_SENDER_PATTERNS = [
   /@messaging\.ebay/i,
   /vendor@/i,
   /@sell\.amazon/i,
+  /@agl\.amazon\.com/i,
 ];
 
 const INTERNAL_NOTIFICATION_PATTERNS = [
@@ -362,6 +363,17 @@ function runLayer2SignalScoring(input) {
     };
   }
 
+  // Mixed signals — never auto-skip; escalate to GPT (which defaults to reply when unsure).
+  if (customer.score >= CUSTOMER_SCORE_SOFT_REPLY && marketing.score >= MARKETING_SCORE_SKIP) {
+    return {
+      ambiguous: true,
+      customerScore: customer.score,
+      marketingScore: marketing.score,
+      customerHits: customer.hits,
+      marketingHits: marketing.hits,
+    };
+  }
+
   if (customer.score >= CUSTOMER_SCORE_REPLY) {
     return {
       shouldRespond: true,
@@ -388,16 +400,6 @@ function runLayer2SignalScoring(input) {
     };
   }
 
-  // Mixed signals — never auto-skip; escalate to GPT (which defaults to reply when unsure).
-  if (customer.score >= CUSTOMER_SCORE_SOFT_REPLY && marketing.score >= MARKETING_SCORE_SKIP) {
-    return {
-      ambiguous: true,
-      customerScore: customer.score,
-      marketingScore: marketing.score,
-      customerHits: customer.hits,
-      marketingHits: marketing.hits,
-    };
-  }
 
   return {
     ambiguous: true,

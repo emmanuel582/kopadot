@@ -10,6 +10,41 @@ import { getToolDeclarations, executeToolCall } from './toolRegistry.js';
 
 const openai = new OpenAI({ apiKey: env.openaiApiKey });
 
+/** Replies that must never be sent to customers — especially after tools returned data. */
+const WEAK_REPLY_PATTERNS = [
+  /which part/i,
+  /focus on first/i,
+  /clarify which/i,
+  /could you please clarify/i,
+  /could you tell me more/i,
+  /tell me more about what you need/i,
+  /gathered quite a bit/i,
+  /try sending your message again/i,
+  /I'm here to help!?\s*$/i,
+  /let me look into this right away/i,
+];
+
+export function isInadequateCustomerReply(text, { toolsUsedCount = 0, channel } = {}) {
+  if (!text || typeof text !== 'string') return true;
+  const trimmed = text.trim();
+  if (trimmed.length < 40) return true;
+  if (WEAK_REPLY_PATTERNS.some((pattern) => pattern.test(trimmed))) return true;
+  if (toolsUsedCount > 0 && trimmed.length < 120) return true;
+  if (channel === CHANNELS.EMAIL && toolsUsedCount >= 2 && trimmed.length < 250) return true;
+  return false;
+}
+
+function getSafeFallbackResponse(channel, { toolsUsedCount = 0, customerName = null } = {}) {
+  const greeting = customerName ? `Hi ${customerName.split(' ')[0]},` : 'Hi,';
+  if (channel === CHANNELS.EMAIL) {
+    if (toolsUsedCount > 0) {
+      return `${greeting}\n\nThank you for your email. I've looked into your enquiry and a colleague on our team will review the details and reply to you within 24 hours with a full answer.\n\nKind regards,\n${env.emailAgentSignoffName}`;
+    }
+    return `${greeting}\n\nThank you for contacting ${env.storeName}. A member of our team will review your message and get back to you within 24 hours.\n\nKind regards,\n${env.emailAgentSignoffName}`;
+  }
+  return "Thanks for your message — a colleague will review this and get back to you shortly.";
+}
+
 function convertGeminiToolsToOpenAI(geminiDeclarations) {
   if (!geminiDeclarations || geminiDeclarations.length === 0) return [];
   const decls = geminiDeclarations[0].functionDeclarations || [];
@@ -180,23 +215,35 @@ You are writing ONE email reply to the specific customer who sent this message.
 - NEVER use placeholders like [Your Name], [Name], or [insert name]. End with exactly: "Kind regards," then a new line with "${env.emailAgentSignoffName}".
 - Do NOT add a second team name line after the sign-off. Do NOT write "Looking forward to your reply!" — end cleanly after answering.
 - This is a single email reply, NOT a live chat. NEVER ask "which part would you like me to focus on" or ask the customer to clarify when they already asked multiple questions — answer ALL of them in this one email using your tool results.
-- If you called tools and have the data, write the full answer immediately. Do not defer or ask follow-up questions unless a critical detail is genuinely missing (e.g. no order number at all).`;
+- If you called tools and have the data, write the full answer immediately. Do not defer or ask follow-up questions unless a critical detail is genuinely missing (e.g. no order number at all).
+- Structure complex answers as short paragraphs (one topic per paragraph). Cover every question the customer asked — tracking, payments, policies, product stock, returns, exchanges, warranty, etc.
+- If a tool returned data, you MUST include the relevant facts in your reply (order status, tracking number, payment amounts, stock status, policy summary). Never ignore tool results.
+- Never send a one-line or vague reply. Email replies should be thorough and self-contained so the customer does not need to chase follow-ups.`;
   }
   return '';
 }
 
 function getMaxToolCallsForChannel(channel) {
   if (channel === CHANNELS.EMAIL) {
-    return Math.max(env.maxToolCallsPerTurn, 8);
+    return Math.max(env.maxToolCallsPerTurn, 10);
   }
   return env.maxToolCallsPerTurn;
 }
 
-async function synthesizeAnswerFromToolResults(messages, channel) {
+async function synthesizeAnswerFromToolResults(messages, channel, { strict = false } = {}) {
   const isEmail = channel === CHANNELS.EMAIL;
+  const strictNote = strict
+    ? ' Your previous draft was too vague. This time be specific and complete — include every fact from the tool results.'
+    : '';
   const synthesisPrompt = isEmail
-    ? `You have finished calling tools. Write ONE complete email reply to the customer now using ONLY the tool results in this conversation. Answer EVERY question they asked (tracking, payments, policies, stock, returns, exchanges, etc.) in a single cohesive email. Do NOT ask which part to focus on. Do NOT say you gathered information — just give the answers. Plain text only, no markdown.`
-    : `You have finished calling tools. Write a complete reply to the customer now using ONLY the tool results above. Answer every question they asked. Do NOT ask which part to focus on first.`;
+    ? `You have finished calling tools. Write ONE complete email reply to the customer now using ONLY the tool results in this conversation.${strictNote}
+
+Requirements:
+- Answer EVERY question they asked in separate short paragraphs (tracking, payments, missing delivery, damaged returns, exchanges, product stock, etc.).
+- Include specific facts from tools: order numbers, statuses, tracking numbers, courier, payment amounts, product names, prices, stock counts.
+- Do NOT ask which part to focus on. Do NOT say you gathered information. Do NOT defer to a follow-up.
+- Plain text only, no markdown. End with "Kind regards," then "${env.emailAgentSignoffName}".`
+    : `You have finished calling tools. Write a complete reply to the customer now using ONLY the tool results above.${strictNote} Answer every question they asked. Do NOT ask which part to focus on first.`;
 
   const synthesisMessages = [
     ...messages,
@@ -206,11 +253,77 @@ async function synthesizeAnswerFromToolResults(messages, channel) {
   const response = await openai.chat.completions.create({
     model: env.openaiModel,
     messages: synthesisMessages,
-    temperature: 0.3,
+    temperature: strict ? 0.2 : 0.3,
     max_tokens: 2048,
   });
 
   return response.choices[0]?.message?.content?.trim() || null;
+}
+
+async function finalizeCustomerReply({ messages, channel, toolsUsed, toolCallCount, maxToolCalls, draftResponse, customerName }) {
+  const toolsUsedCount = toolsUsed.length;
+  const isEmail = channel === CHANNELS.EMAIL;
+  let finalResponse = draftResponse;
+  let synthesized = false;
+  let qualityRetries = 0;
+
+  // Email with tool data: always synthesize one complete reply from all tool results.
+  if (isEmail && toolsUsedCount > 0) {
+    logger.info('Email channel — synthesizing complete reply from tool results');
+    finalResponse = await synthesizeAnswerFromToolResults(messages, channel);
+    synthesized = true;
+  } else if (!finalResponse && toolCallCount > 0) {
+    if (toolCallCount >= maxToolCalls) {
+      logger.warn(`Tool call limit reached (${maxToolCalls}) — synthesizing answer from tool results`);
+    }
+    finalResponse = await synthesizeAnswerFromToolResults(messages, channel);
+    synthesized = true;
+  }
+
+  while (
+    isInadequateCustomerReply(finalResponse, { toolsUsedCount, channel })
+    && toolsUsedCount > 0
+    && qualityRetries < 2
+  ) {
+    qualityRetries++;
+    logger.warn('Inadequate reply detected — re-synthesizing', { attempt: qualityRetries, channel });
+    finalResponse = await synthesizeAnswerFromToolResults(messages, channel, { strict: true });
+    synthesized = true;
+  }
+
+  if (isInadequateCustomerReply(finalResponse, { toolsUsedCount, channel })) {
+    logger.error('Reply still inadequate after synthesis retries — using safe fallback + human follow-up', {
+      channel,
+      toolsUsedCount,
+      preview: finalResponse?.slice(0, 120),
+    });
+    return {
+      finalResponse: getSafeFallbackResponse(channel, { toolsUsedCount, customerName }),
+      synthesized,
+      qualityRetries,
+      inadequateReply: true,
+      needsHumanFollowUp: true,
+    };
+  }
+
+  if (!finalResponse) {
+    finalResponse = getSafeFallbackResponse(channel, { toolsUsedCount, customerName });
+    return {
+      finalResponse,
+      synthesized,
+      qualityRetries,
+      inadequateReply: false,
+      needsHumanFollowUp: true,
+    };
+  }
+
+  return {
+    finalResponse,
+    synthesized,
+    qualityRetries,
+    inadequateReply: false,
+    needsHumanFollowUp: false,
+  };
 }
 
 function convertHistoryToOpenAI(geminiHistory) {
@@ -346,9 +459,10 @@ export async function processMessage(message, conversationHistory = [], sessionC
       { role: 'user', content: `<user_input>\n${message}\n</user_input>` }
     ];
 
-    let finalResponse = null;
+    let draftResponse = null;
     let currentModel = env.openaiModel;
     const maxToolCalls = getMaxToolCallsForChannel(sessionContext?.channel);
+    const customerName = sessionContext?.customerIdentity?.name || null;
 
     while (toolCallCount < maxToolCalls) {
       const response = await openai.chat.completions.create({
@@ -387,34 +501,31 @@ export async function processMessage(message, conversationHistory = [], sessionC
       }
 
       if (messageObj.content) {
-        finalResponse = messageObj.content;
-      } else {
-        finalResponse = "I'm here to help! Could you please tell me more about what you need?";
+        draftResponse = messageObj.content;
       }
 
       break;
     }
 
-    if (!finalResponse && toolCallCount > 0) {
-      if (toolCallCount >= maxToolCalls) {
-        logger.warn(`Tool call limit reached (${maxToolCalls}) — synthesizing answer from tool results`);
-      } else {
-        logger.info('No final text after tool loop — synthesizing answer from tool results');
-      }
-      finalResponse = await synthesizeAnswerFromToolResults(messages, sessionContext?.channel);
-    }
-
-    if (!finalResponse) {
-      finalResponse = "I'm here to help! Could you please tell me more about what you need?";
-    }
-
-    // 2. Guardrail Output Scanning Firewall
-    let needsHumanFollowUp = false;
+    const finalized = await finalizeCustomerReply({
+      messages,
+      channel: sessionContext?.channel,
+      toolsUsed,
+      toolCallCount,
+      maxToolCalls,
+      draftResponse,
+      customerName,
+    });
+    let finalResponse = finalized.finalResponse;
+    let needsHumanFollowUp = finalized.needsHumanFollowUp;
     if (finalResponse) {
       const outputGuardrail = await checkOutputGuardrails(finalResponse);
       if (!outputGuardrail.is_safe) {
         logger.error(`Output Guardrail blocked response: ${outputGuardrail.reason}`, { originalResponse: finalResponse });
-        finalResponse = "Let me look into this right away for you.";
+        finalResponse = getSafeFallbackResponse(sessionContext?.channel, {
+          toolsUsedCount: toolsUsed.length,
+          customerName,
+        });
         needsHumanFollowUp = true;
         await executeToolCall('createEscalationTicket', { subject: 'Output Guardrail Blocked', summary: 'The AI output was blocked by the security guardrail. Silent escalation triggered.' });
       }
@@ -442,12 +553,16 @@ export async function processMessage(message, conversationHistory = [], sessionC
         model: currentModel,
         tools_used: toolsUsed.map(t => t.name),
         needsHumanFollowUp,
+        synthesized: finalized.synthesized,
+        qualityRetries: finalized.qualityRetries,
+        inadequateReply: finalized.inadequateReply,
       },
     };
   } catch (error) {
     logger.error(`ChatGPT engine error: ${error.message}`, { stack: error.stack });
+    const customerName = sessionContext?.customerIdentity?.name || null;
     return {
-      response: "I want to make sure I give you the best help possible. Could you try sending your message again? If the issue continues, I will look into it right away for you.",
+      response: getSafeFallbackResponse(sessionContext?.channel, { customerName }),
       toolsUsed,
       conversationUpdate: buildConversationUpdate(message, '[ERROR]'),
       metadata: {

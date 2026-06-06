@@ -220,23 +220,27 @@ async function routeEmailToHumanQueue(client, messageId, { subject, reason } = {
 
 function emailNeedsHumanFollowUp(agentResult, escalationCheck) {
   if (escalationCheck?.shouldEscalate) {
-    return { needsHuman: true, reason: escalationCheck.reason || 'auto_escalation' };
+    return { needsHuman: true, reason: escalationCheck.reason || 'auto_escalation', stillSendReply: false };
+  }
+
+  if (agentResult?.metadata?.inadequateReply) {
+    return { needsHuman: true, reason: 'inadequate_ai_reply', stillSendReply: true };
   }
 
   if (agentResult?.metadata?.needsHumanFollowUp) {
-    return { needsHuman: true, reason: 'agent_escalation' };
+    return { needsHuman: true, reason: 'agent_escalation', stillSendReply: false };
   }
 
   if (agentResult?.metadata?.error) {
-    return { needsHuman: true, reason: 'agent_error' };
+    return { needsHuman: true, reason: 'agent_error', stillSendReply: false };
   }
 
   const tools = agentResult?.toolsUsed || [];
   if (tools.some((t) => t.name === 'createEscalationTicket')) {
-    return { needsHuman: true, reason: 'escalation_ticket' };
+    return { needsHuman: true, reason: 'escalation_ticket', stillSendReply: false };
   }
 
-  return { needsHuman: false };
+  return { needsHuman: false, stillSendReply: false };
 }
 
 function stripHtml(html) {
@@ -675,7 +679,7 @@ async function processInboundEmail(client, msg, sentMessages = [], { force = fal
   recordToolUsage(sessionId, agentResult.toolsUsed?.length || 0);
 
   const humanCheck = emailNeedsHumanFollowUp(agentResult, escalationCheck);
-  if (humanCheck.needsHuman) {
+  if (humanCheck.needsHuman && !humanCheck.stillSendReply) {
     await routeEmailToHumanQueue(client, msg.id, {
       subject,
       reason: humanCheck.reason,
@@ -692,6 +696,17 @@ async function processInboundEmail(client, msg, sentMessages = [], { force = fal
 
   // Graph /reply always goes back to the sender of this specific message — never a random address.
   await sendEmailReply(client, msg.id, formatted.html);
+
+  if (humanCheck.needsHuman && humanCheck.stillSendReply) {
+    await routeEmailToHumanQueue(client, msg.id, {
+      subject,
+      reason: humanCheck.reason,
+    });
+    logger.warn('Safe fallback reply sent — email also routed for human review', {
+      subject,
+      reason: humanCheck.reason,
+    });
+  }
 
   sentMessages.push({
     conversationId: msg.conversationId,

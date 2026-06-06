@@ -74,7 +74,7 @@ const env = {
   maxConversationHistory: parseInt(process.env.MAX_CONVERSATION_HISTORY || '20', 10),
 
   // Safety
-  maxToolCallsPerTurn: parseInt(process.env.MAX_TOOL_CALLS_PER_TURN || '8', 10),
+  maxToolCallsPerTurn: parseInt(process.env.MAX_TOOL_CALLS_PER_TURN || '10', 10),
   confidenceThreshold: parseFloat(process.env.CONFIDENCE_THRESHOLD || '0.7'),
 };
 

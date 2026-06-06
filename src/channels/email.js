@@ -1,7 +1,6 @@
 import { ConfidentialClientApplication } from '@azure/msal-node';
 import { Client } from '@microsoft/microsoft-graph-client';
 import 'isomorphic-fetch';
-import OpenAI from 'openai';
 import env from '../config/env.js';
 import { CHANNELS } from '../config/constants.js';
 import logger from '../middleware/logger.js';
@@ -15,13 +14,13 @@ import {
 } from '../agent/conversationMgr.js';
 import { shouldAutoEscalate } from '../agent/escalation.js';
 import { formatResponse } from '../utils/responseFormatter.js';
-
-const openai = new OpenAI({ apiKey: env.openaiApiKey });
+import { triageInboundEmail } from './emailTriage.js';
 
 let graphClient = null;
 let isPolling = false;
 let escalatedFolderId = null;
 const processedMessageIds = new Set();
+const processingMessageIds = new Set();
 const MAX_PROCESSED_IDS = 5000;
 
 function getOwnMailbox() {
@@ -33,7 +32,7 @@ function getLookbackSinceIso() {
   return new Date(since).toISOString();
 }
 
-const MESSAGE_SELECT = 'id,subject,bodyPreview,from,body,conversationId,receivedDateTime,isRead';
+const MESSAGE_SELECT = 'id,subject,bodyPreview,from,body,conversationId,receivedDateTime,isRead,internetMessageHeaders';
 
 function getGraphClient() {
   if (graphClient) return graphClient;
@@ -268,189 +267,8 @@ function trackProcessedMessage(messageId) {
   }
 }
 
-const AUTOMATED_SENDER_PATTERNS = [
-  /no[-_.]?reply/i,
-  /donotreply/i,
-  /do[-_.]?not[-_.]?reply/i,
-  /mailer-daemon/i,
-  /postmaster@/i,
-  /bounce@/i,
-  /notifications?@/i,
-  /alerts?@/i,
-];
-
-const INTERNAL_NOTIFICATION_PATTERNS = [
-  /^\[KopaDot\]/i,
-  /ticket\s*\(#\d+\)\s*by/i,
-  /has been received\.\s*It is unassigned/i,
-];
-
-const MARKETING_SUBJECT_PATTERNS = [
-  /ship now/i,
-  /you made the sale/i,
-  /you have a new order/i,
-  /upgrade reminder/i,
-  /newsletter/i,
-  /\bseo\b/i,
-  /partnership opportunity/i,
-  /wholesale/i,
-  /traffic magnet/i,
-  /conversion flow/i,
-  /website design/i,
-  /refurbished.*screen/i,
-  /months pro free/i,
-  /could we discuss/i,
-  /store structure observation/i,
-  /re:\s*\[\[/i,
-  /reminder to speed up/i,
-  /approaching delivery times/i,
-  /order\(s\) about to be late/i,
-  /successfully cancelled an order/i,
-  /buyer wants to cancel/i,
-  /statement summary is ready/i,
-  /new device is using your account/i,
-  /has shipped your sold item/i,
-  /your order has shipped/i,
-  /fulfilment order/i,
-  /refund initiated/i,
-  /feedback notification/i,
-  /sent a message about/i,
-  /limited-time.*discount/i,
-];
-
-const PLATFORM_SENDER_DOMAINS = [
-  '@amazon.',
-  '@ebay.',
-  '@zendesk.com',
-  '@parcelpanel',
-  '@ingrammicro',
-  '@marketplace.',
-  '@google.com',
-  '@facebookmail.com',
-];
-
-const CUSTOMER_SUPPORT_SIGNALS = [
-  /\border\s*(#?\d{5,}|number|dux\d+)/i,
-  /\bcancel(l)?(ing|ation)?\b/i,
-  /\brefund\b/i,
-  /\breturn\b/i,
-  /\btrack(ing)?\b/i,
-  /\bship(ped|ping)?\b/i,
-  /where is my/i,
-  /haven'?t received/i,
-  /not received/i,
-  /not dispatched/i,
-  /\bdelivery\b/i,
-  /\bhelp\b/i,
-  /\bissue\b/i,
-  /\bproblem\b/i,
-  /\bpolicy on\b/i,
-  /\?\s*$/,
-  /\?/,
-];
-
-/**
- * Hard-filter obvious non-customer emails before the AI classifier runs.
- */
-function isObviousNonCustomerEmail(senderEmail, subject = '', bodyPreview = '') {
-  if (!senderEmail) {
-    return { skip: true, reason: 'no_sender_address' };
-  }
-
-  const normalized = senderEmail.toLowerCase().trim();
-  const ownMailbox = getOwnMailbox();
-
-  if (ownMailbox && normalized === ownMailbox) {
-    return { skip: true, reason: 'sent_from_own_mailbox' };
-  }
-
-  if (AUTOMATED_SENDER_PATTERNS.some((pattern) => pattern.test(normalized))) {
-    return { skip: true, reason: 'automated_sender_address' };
-  }
-
-  const combined = `${subject}\n${bodyPreview}`;
-  if (INTERNAL_NOTIFICATION_PATTERNS.some((pattern) => pattern.test(combined))) {
-    return { skip: true, reason: 'internal_system_notification' };
-  }
-
-  return { skip: false };
-}
-
-function isLikelyCustomerSupport(subject, bodyPreview) {
-  const combined = `${subject}\n${bodyPreview}`;
-  return CUSTOMER_SUPPORT_SIGNALS.some((pattern) => pattern.test(combined));
-}
-
-function shouldSkipWithoutGpt(senderEmail, subject) {
-  const normalized = senderEmail?.toLowerCase() || '';
-  if (PLATFORM_SENDER_DOMAINS.some((domain) => normalized.includes(domain))) {
-    return { skip: true, reason: 'platform_notification_sender' };
-  }
-  if (MARKETING_SUBJECT_PATTERNS.some((pattern) => pattern.test(subject))) {
-    return { skip: true, reason: 'marketing_or_automated_subject' };
-  }
-  return { skip: false };
-}
-
-/**
- * Decide if we should reply — uses GPT only for ambiguous emails.
- */
-async function classifyEmailNeed(subject, bodyPreview, senderEmail) {
-  const noGptSkip = shouldSkipWithoutGpt(senderEmail, subject);
-  if (noGptSkip.skip) {
-    return { shouldRespond: false, reason: noGptSkip.reason };
-  }
-
-  if (isLikelyCustomerSupport(subject, bodyPreview)) {
-    return { shouldRespond: true, reason: 'customer_support_signals' };
-  }
-
-  return shouldRespondToEmail(subject, bodyPreview, senderEmail);
-}
-
-/**
- * Classify whether an inbound email needs a personalized support reply.
- */
-async function shouldRespondToEmail(subject, bodyPreview, senderEmail) {
-  try {
-    const response = await openai.chat.completions.create({
-      model: env.openaiModel,
-      messages: [
-        {
-          role: 'system',
-          content: `You classify inbound emails for an e-commerce support inbox (${env.storeName}).
-
-Respond YES (needs_response: true) when a real customer is asking for help, such as:
-- Order status, tracking, delivery issues
-- Returns, refunds, cancellations
-- Product questions or complaints
-- Payment or account issues
-- General support questions directed at the store
-
-Respond NO (needs_response: false) for:
-- Marketing newsletters, promotions, spam
-- Automated notifications (shipping alerts, seller central, system alerts)
-- Government/regulatory correspondence not asking the store for help
-- Out-of-office or auto-replies
-- Internal/team emails not requesting customer support
-
-Respond ONLY with JSON: {"needs_response": true/false, "reason": "brief reason"}`,
-        },
-        {
-          role: 'user',
-          content: `From: ${senderEmail || 'unknown'}\nSubject: ${subject}\n\nPreview:\n${bodyPreview}`,
-        },
-      ],
-      temperature: 0.1,
-      response_format: { type: 'json_object' },
-    });
-
-    const result = JSON.parse(response.choices[0].message.content);
-    return { shouldRespond: Boolean(result.needs_response), reason: result.reason || '' };
-  } catch (error) {
-    logger.warn(`Failed to classify email: ${error.message} — defaulting to reply`);
-    return { shouldRespond: true, reason: 'classification_failed_default_reply' };
-  }
+function normalizeEmailSubject(subject = '') {
+  return subject.replace(/^(re|fw|fwd):\s*/gi, '').trim().toLowerCase();
 }
 
 async function fetchMessagePage(client, requestBuilder, maxMessages) {
@@ -469,8 +287,8 @@ async function fetchMessagePage(client, requestBuilder, maxMessages) {
 }
 
 /**
- * Fetch inbox candidates: prioritises the last 6 hours (read or unread), then
- * unread mail, then the wider lookback window.
+ * Fetch inbox candidates: prioritises unread mail from the last 6 hours,
+ * then other unread mail, then the wider lookback window.
  */
 async function fetchCandidateMessages(client) {
   const inbox = `/users/${env.msGraphUserId}/mailFolders/inbox/messages`;
@@ -497,7 +315,7 @@ async function fetchCandidateMessages(client) {
 
   const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
   const priorityRecentFiltered = priorityRecent.filter(
-    (m) => new Date(m.receivedDateTime).getTime() >= sixHoursAgo,
+    (m) => !m.isRead && new Date(m.receivedDateTime).getTime() >= sixHoursAgo,
   );
   const priorityIds = new Set(priorityRecentFiltered.map((m) => m.id));
   const byId = new Map();
@@ -546,19 +364,72 @@ function isCountableSupportReply(sent) {
 }
 
 function wasAlreadyRepliedTo(inboundMsg, sentMessages) {
+  if (!inboundMsg.receivedDateTime) return false;
+
+  const ownMailbox = getOwnMailbox();
+  const inboundTime = new Date(inboundMsg.receivedDateTime).getTime();
+  const inboundSubject = normalizeEmailSubject(inboundMsg.subject);
+
+  return sentMessages.some((sent) => {
+    if (!isCountableSupportReply(sent)) return false;
+    const from = sent.from?.emailAddress?.address?.toLowerCase().trim();
+    if (from !== ownMailbox) return false;
+    const sentTime = new Date(sent.sentDateTime).getTime();
+    if (sentTime <= inboundTime) return false;
+
+    if (inboundMsg.conversationId && sent.conversationId === inboundMsg.conversationId) {
+      return true;
+    }
+
+    const sentSubject = normalizeEmailSubject(sent.subject);
+    if (inboundSubject && sentSubject && (
+      sentSubject === inboundSubject
+      || sentSubject.includes(inboundSubject)
+      || inboundSubject.includes(sentSubject)
+    )) {
+      return true;
+    }
+
+    return false;
+  });
+}
+
+/**
+ * Check the Graph conversation thread for an outbound reply from our mailbox.
+ * Survives multi-instance deploys and Sent Items sync delay.
+ */
+async function hasReplyInConversation(client, inboundMsg) {
   if (!inboundMsg.conversationId || !inboundMsg.receivedDateTime) return false;
 
   const ownMailbox = getOwnMailbox();
   const inboundTime = new Date(inboundMsg.receivedDateTime).getTime();
 
-  return sentMessages.some((sent) => {
-    if (!isCountableSupportReply(sent)) return false;
-    if (sent.conversationId !== inboundMsg.conversationId) return false;
-    const from = sent.from?.emailAddress?.address?.toLowerCase().trim();
-    if (from !== ownMailbox) return false;
-    const sentTime = new Date(sent.sentDateTime).getTime();
-    return sentTime > inboundTime;
-  });
+  try {
+    const response = await client
+      .api(`/users/${env.msGraphUserId}/messages`)
+      .filter(`conversationId eq '${inboundMsg.conversationId}'`)
+      .select('id,from,receivedDateTime,sentDateTime')
+      .top(25)
+      .get();
+
+    return (response.value || []).some((message) => {
+      const from = message.from?.emailAddress?.address?.toLowerCase().trim();
+      if (from !== ownMailbox) return false;
+      const messageTime = new Date(message.sentDateTime || message.receivedDateTime).getTime();
+      return messageTime > inboundTime;
+    });
+  } catch (error) {
+    logger.warn(`Could not check conversation for existing reply: ${error.message}`, {
+      conversationId: inboundMsg.conversationId,
+    });
+    return false;
+  }
+}
+
+async function skipHandledEmail(client, msg, reason) {
+  trackProcessedMessage(msg.id);
+  await markEmailAsRead(client, msg.id);
+  return { replied: false, reason };
 }
 
 async function markEmailAsRead(client, messageId) {
@@ -592,9 +463,9 @@ async function sendEmailReply(client, messageId, htmlContent) {
  * Process a single inbound email through the AI agent and reply if appropriate.
  */
 async function processInboundEmail(client, msg, sentMessages = [], { force = false } = {}) {
-  if (processedMessageIds.has(msg.id)) {
+  if (processingMessageIds.has(msg.id) || processedMessageIds.has(msg.id)) {
     logger.debug(`Skipping already-processed email: ${msg.id}`);
-    return { replied: false, reason: 'already_processed' };
+    return skipHandledEmail(client, msg, 'already_processed');
   }
 
   const senderEmail = msg.from?.emailAddress?.address || null;
@@ -608,29 +479,68 @@ async function processInboundEmail(client, msg, sentMessages = [], { force = fal
       messageId: msg.id,
       conversationId: msg.conversationId,
     });
-    trackProcessedMessage(msg.id);
-    return { replied: false, reason: 'already_replied' };
+    return skipHandledEmail(client, msg, 'already_replied');
   }
 
-  const hardFilter = isObviousNonCustomerEmail(senderEmail, subject, bodyPreview);
-  if (hardFilter.skip) {
-    logger.debug(`Email skipped (hard filter): "${subject}" from ${senderEmail} — ${hardFilter.reason}`);
+  if (!force && await hasReplyInConversation(client, msg)) {
+    logger.debug(`Skipping email — conversation already has our reply: "${subject}"`, {
+      messageId: msg.id,
+      conversationId: msg.conversationId,
+    });
+    return skipHandledEmail(client, msg, 'conversation_already_replied');
+  }
+
+  const triage = await triageInboundEmail({
+    senderEmail,
+    senderName,
+    subject,
+    bodyPreview,
+    plainBody,
+    internetMessageHeaders: msg.internetMessageHeaders,
+  }, { ownMailbox: getOwnMailbox() });
+
+  if (!triage.shouldRespond) {
+    logger.debug(`Email skipped (triage L${triage.layer}): "${subject}" — ${triage.reason}`, {
+      confidence: triage.confidence,
+      gptUsed: triage.gptUsed,
+      customerScore: triage.customerScore,
+      marketingScore: triage.marketingScore,
+    });
     await markEmailAsRead(client, msg.id);
     trackProcessedMessage(msg.id);
-    return { replied: false, reason: hardFilter.reason };
+    return { replied: false, reason: triage.reason, triage };
   }
 
-  const { shouldRespond, reason } = await classifyEmailNeed(subject, plainBody.slice(0, 1500), senderEmail);
-
-  if (!shouldRespond) {
-    logger.debug(`Email skipped (no reply needed): "${subject}" — ${reason}`);
-    await markEmailAsRead(client, msg.id);
-    trackProcessedMessage(msg.id);
-    return { replied: false, reason };
-  }
+  logger.info(`Email passed triage (L${triage.layer}): "${subject}" — ${triage.reason}`, {
+    confidence: triage.confidence,
+    gptUsed: triage.gptUsed,
+    customerScore: triage.customerScore,
+    marketingScore: triage.marketingScore,
+  });
 
   logger.info(`Email needs support reply: "${subject}" from ${senderEmail || 'unknown'}`);
 
+  processingMessageIds.add(msg.id);
+  try {
+    return await processSupportEmail(client, msg, sentMessages, {
+      senderEmail,
+      senderName,
+      subject,
+      plainBody,
+      force,
+    });
+  } finally {
+    processingMessageIds.delete(msg.id);
+  }
+}
+
+async function processSupportEmail(client, msg, sentMessages, {
+  senderEmail,
+  senderName,
+  subject,
+  plainBody,
+  force,
+}) {
   const sessionId = `email-${msg.conversationId || senderEmail || msg.id}`;
   getSession(sessionId, { channel: CHANNELS.EMAIL });
 
@@ -694,6 +604,16 @@ async function processInboundEmail(client, msg, sentMessages = [], { force = fal
     agentName: env.emailAgentSignoffName,
   });
 
+  if (!force && await hasReplyInConversation(client, msg)) {
+    logger.warn(`Duplicate reply prevented at send time for "${subject}"`, {
+      messageId: msg.id,
+      conversationId: msg.conversationId,
+    });
+    await markEmailAsRead(client, msg.id);
+    trackProcessedMessage(msg.id);
+    return { replied: false, reason: 'duplicate_reply_prevented' };
+  }
+
   // Graph /reply always goes back to the sender of this specific message — never a random address.
   await sendEmailReply(client, msg.id, formatted.html);
 
@@ -710,6 +630,7 @@ async function processInboundEmail(client, msg, sentMessages = [], { force = fal
 
   sentMessages.push({
     conversationId: msg.conversationId,
+    subject: subject.startsWith('Re:') ? subject : `Re: ${subject}`,
     sentDateTime: new Date().toISOString(),
     from: { emailAddress: { address: env.msGraphUserId } },
   });
@@ -754,7 +675,18 @@ export async function pollEmails() {
     const unreadCount = messages.filter((m) => !m.isRead).length;
     logger.info(`Found ${messages.length} candidate email(s) (${unreadCount} unread, lookback ${env.emailLookbackHours}h). Processing...`);
 
+    const toProcess = [];
     for (const msg of messages) {
+      if (processedMessageIds.has(msg.id)) continue;
+      if (wasAlreadyRepliedTo(msg, sentMessages)) {
+        logger.debug(`Pre-filter skip (already replied): "${msg.subject}"`, { messageId: msg.id });
+        await skipHandledEmail(client, msg, 'already_replied_prefilter');
+        continue;
+      }
+      toProcess.push(msg);
+    }
+
+    for (const msg of toProcess) {
       try {
         await processInboundEmail(client, msg, sentMessages);
       } catch (error) {
@@ -840,6 +772,8 @@ export async function replyToSpecificEmail({ fromEmail, subjectContains, force =
   const sentMessages = await fetchRecentSentMessages(client);
   if (!force && wasAlreadyRepliedTo(msg, sentMessages)) {
     logger.info(`Already replied to "${msg.subject}" from ${fromEmail} — skipping`);
+    await markEmailAsRead(client, msg.id);
+    trackProcessedMessage(msg.id);
     return { replied: false, reason: 'already_replied', messageId: msg.id };
   }
 

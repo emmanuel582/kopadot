@@ -63,6 +63,9 @@ const env = {
   emailPollingEnabled: process.env.EMAIL_POLLING_ENABLED === 'true',
   emailAgentSignoffName: sanitizeEnv(process.env.EMAIL_AGENT_SIGNOFF_NAME) || 'The KopaDot Support Team',
   emailEscalatedFolderName: process.env.EMAIL_ESCALATED_FOLDER_NAME || 'Escalated',
+  // Cheap model for ambiguous email triage only (Layer 3). Defaults to gpt-4o-mini.
+  emailClassifierModel: process.env.EMAIL_CLASSIFIER_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini',
+  emailClassifyPreviewChars: parseInt(process.env.EMAIL_CLASSIFY_PREVIEW_CHARS || '400', 10),
 
   // Store
   storeName: process.env.STORE_NAME || 'Our Store',

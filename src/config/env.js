@@ -57,10 +57,10 @@ const env = {
   msGraphClientSecret: sanitizeEnv(process.env.MS_GRAPH_CLIENT_SECRET),
   msGraphUserId: sanitizeEnv(process.env.MS_GRAPH_USER_ID),
   emailPollIntervalMs: 30000, // Force 30s polling, ignoring process.env.EMAIL_POLL_INTERVAL_MS
-  emailLookbackHours: parseInt(process.env.EMAIL_LOOKBACK_HOURS || '72', 10),
-  emailPriorityHours: parseInt(process.env.EMAIL_PRIORITY_HOURS || '48', 10),
-  emailMaxPerPoll: parseInt(process.env.EMAIL_MAX_PER_POLL || '50', 10),
-  emailBacklogDrainPerPoll: parseInt(process.env.EMAIL_BACKLOG_DRAIN_PER_POLL || '50', 10),
+  emailLookbackHours: 72,   // Hardcoded — do NOT use process.env, stale Render vars override and break polling
+  emailPriorityHours: 48,   // Hardcoded — must be wide enough to catch weekend/overnight emails
+  emailMaxPerPoll: 50,      // Hardcoded — handle bursts of up to 50 emails per poll cycle
+  emailBacklogDrainPerPoll: 50, // Hardcoded — drain old unread emails efficiently
   // Set EMAIL_POLLING_ENABLED=true on Render to start inbox polling (requires Mail.ReadWrite).
   emailPollingEnabled: process.env.EMAIL_POLLING_ENABLED === 'true',
   emailAgentSignoffName: sanitizeEnv(process.env.EMAIL_AGENT_SIGNOFF_NAME) || 'The KopaDot Support Team',

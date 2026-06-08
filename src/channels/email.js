@@ -235,16 +235,16 @@ function emailNeedsHumanFollowUp(agentResult, escalationCheck) {
   }
 
   if (agentResult?.metadata?.needsHumanFollowUp) {
-    return { needsHuman: true, reason: 'agent_escalation', stillSendReply: false };
+    return { needsHuman: true, reason: 'agent_escalation', stillSendReply: true };
   }
 
   if (agentResult?.metadata?.error) {
-    return { needsHuman: true, reason: 'agent_error', stillSendReply: false };
+    return { needsHuman: true, reason: 'agent_error', stillSendReply: true };
   }
 
   const tools = agentResult?.toolsUsed || [];
   if (tools.some((t) => t.name === 'createEscalationTicket')) {
-    return { needsHuman: true, reason: 'escalation_ticket', stillSendReply: false };
+    return { needsHuman: true, reason: 'escalation_ticket', stillSendReply: true };
   }
 
   return { needsHuman: false, stillSendReply: false };

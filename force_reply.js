@@ -3,7 +3,7 @@ import { replyToSpecificEmail } from './src/channels/email.js';
 async function main() {
   try {
     const res = await replyToSpecificEmail({
-      fromEmail: 'emmanuelwritecode@gmail.com',
+      fromEmail: 'bukkyglory2020@gmail.com',
       force: true
     });
     console.log("Result:", res);

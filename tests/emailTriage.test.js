@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { triageInboundEmail, parseEmailHeaders } from '../src/channels/emailTriage.js';
+import { triageInboundEmail, triageInboundEmailFast, parseEmailHeaders } from '../src/channels/emailTriage.js';
 
 const OWN = 'support@kopadot.com';
 
@@ -144,11 +144,69 @@ describe('emailTriage — customer safety (must never block real queries)', () =
     assert.notEqual(result.reason, 'high_marketing_score');
   });
 
+  it('skips Roblox security notification', async () => {
+    const result = await triageInboundEmail({
+      senderEmail: 'accounts@roblox.com',
+      subject: '2-Step Verification with Authenticator Activated for Roblox Account: EvilDaveyboy',
+      bodyPreview: 'Your Roblox account now has 2-Step Verification enabled.',
+    }, { ownMailbox: OWN });
+
+    assert.equal(result.shouldRespond, false);
+    assert.equal(result.gptUsed, false);
+  });
+
+  it('skips Temu platform mail', async () => {
+    const result = await triageInboundEmail({
+      senderEmail: 'seller@orders.temu.com',
+      subject: '1 order(s) about to be late for delivery. Please process ASAP.',
+      bodyPreview: 'Please process your Temu orders.',
+    }, { ownMailbox: OWN });
+
+    assert.equal(result.shouldRespond, false);
+    assert.equal(result.layer, 1);
+  });
+
+  it('skips WKD distributor vendor outreach', async () => {
+    const result = await triageInboundEmail({
+      senderEmail: 'craig@wkd.me',
+      subject: 'RE: WKD Distribution Limited - Mobile Accessories Distributor.',
+      bodyPreview: 'Please find our latest trade prices attached.',
+    }, { ownMailbox: OWN });
+
+    assert.equal(result.shouldRespond, false);
+    assert.equal(result.gptUsed, false);
+  });
+
   it('allows product question from personal email', async () => {
     const result = await triageInboundEmail({
       senderEmail: 'customer@gmail.com',
       subject: 'Is this item still in stock?',
       bodyPreview: 'Hello, I am interested in the Samsung Galaxy Watch. Is it available? What is your returns policy?',
+    }, { ownMailbox: OWN });
+
+    assert.equal(result.shouldRespond, true);
+    assert.ok(result.customerScore >= 3);
+  });
+});
+
+describe('emailTriage fast backlog drain', () => {
+  it('marks ambiguous backlog as skip without GPT', () => {
+    const result = triageInboundEmailFast({
+      senderEmail: 'vendor@supplier.com',
+      subject: 'Newsletter June',
+      bodyPreview: 'Check out our latest deals.',
+    }, { ownMailbox: OWN });
+
+    assert.equal(result.shouldRespond, false);
+    assert.equal(result.gptUsed, false);
+    assert.equal(result.reason, 'backlog_ambiguous_skip');
+  });
+
+  it('keeps backlog mail with strong customer signals', () => {
+    const result = triageInboundEmailFast({
+      senderEmail: 'emmanuelwritecode@gmail.com',
+      subject: 'Order #40599099 — DPD label created but not moving',
+      bodyPreview: 'Hi KopaDot, I need help with order #40599099. Has it shipped?',
     }, { ownMailbox: OWN });
 
     assert.equal(result.shouldRespond, true);

@@ -374,13 +374,25 @@ async function drainInboxBacklog(client, { aggressive = false } = {}) {
       continue;
     }
 
-    const readOk = await markEmailAsRead(client, msg.id);
-    trackProcessedMessage(msg.id);
-    drained += 1;
-    logger.debug(`Backlog drained (mark read): "${msg.subject}" — ${triage.reason}`, {
-      messageId: msg.id,
-      markReadOk: readOk,
-    });
+    // Only drain if Layer 1 hard-denied (automated sender, platform notification, etc.)
+    // Layer 2 ambiguous skips are left unread — the priority loop will give them full GPT triage.
+    if (triage.layer === 1) {
+      const readOk = await markEmailAsRead(client, msg.id);
+      trackProcessedMessage(msg.id);
+      drained += 1;
+      logger.debug(`Backlog drained (mark read): "${msg.subject}" — ${triage.reason}`, {
+        messageId: msg.id,
+        markReadOk: readOk,
+      });
+    } else {
+      // Layer 2 skip with low confidence — leave unread for full triage
+      kept += 1;
+      logger.debug(`Backlog kept for full triage: "${msg.subject}" — ${triage.reason}`, {
+        messageId: msg.id,
+        customerScore: triage.customerScore,
+        marketingScore: triage.marketingScore,
+      });
+    }
   }
 
   const remaining = batch.length >= limit;
@@ -819,8 +831,8 @@ export async function pollEmails() {
       toProcess.push(msg);
     }
 
-    // Process concurrently in chunks of 10 to handle up to 50 emails quickly without rate limiting
-    const chunkSize = 10;
+    // Process concurrently in chunks of 5 to handle up to 50 emails reliably without rate limiting
+    const chunkSize = 5;
     for (let i = 0; i < toProcess.length; i += chunkSize) {
       const chunk = toProcess.slice(i, i + chunkSize);
       await Promise.all(chunk.map(async (msg) => {

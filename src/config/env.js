@@ -56,10 +56,10 @@ const env = {
   msGraphClientId: sanitizeEnv(process.env.MS_GRAPH_CLIENT_ID),
   msGraphClientSecret: sanitizeEnv(process.env.MS_GRAPH_CLIENT_SECRET),
   msGraphUserId: sanitizeEnv(process.env.MS_GRAPH_USER_ID),
-  emailPollIntervalMs: parseInt(process.env.EMAIL_POLL_INTERVAL_MS || '30000', 10),
-  emailLookbackHours: parseInt(process.env.EMAIL_LOOKBACK_HOURS || '6', 10),
-  emailPriorityHours: parseInt(process.env.EMAIL_PRIORITY_HOURS || '6', 10),
-  emailMaxPerPoll: parseInt(process.env.EMAIL_MAX_PER_POLL || '20', 10),
+  emailPollIntervalMs: 30000, // Force 30s polling, ignoring process.env.EMAIL_POLL_INTERVAL_MS
+  emailLookbackHours: parseInt(process.env.EMAIL_LOOKBACK_HOURS || '72', 10),
+  emailPriorityHours: parseInt(process.env.EMAIL_PRIORITY_HOURS || '48', 10),
+  emailMaxPerPoll: parseInt(process.env.EMAIL_MAX_PER_POLL || '50', 10),
   emailBacklogDrainPerPoll: parseInt(process.env.EMAIL_BACKLOG_DRAIN_PER_POLL || '50', 10),
   // Set EMAIL_POLLING_ENABLED=true on Render to start inbox polling (requires Mail.ReadWrite).
   emailPollingEnabled: process.env.EMAIL_POLLING_ENABLED === 'true',

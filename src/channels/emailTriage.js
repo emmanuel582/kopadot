@@ -523,12 +523,49 @@ export function triageInboundEmailFast(input, { ownMailbox = '' } = {}) {
     return { ...layer2, gptUsed: false };
   }
 
+  // Any customer signals at all → keep for full processing (never silently discard)
   if (layer2.customerScore >= CUSTOMER_SCORE_SOFT_REPLY) {
     return {
       shouldRespond: true,
       layer: 2,
       reason: 'backlog_customer_signals_need_review',
       confidence: 0.8,
+      gptUsed: false,
+      customerScore: layer2.customerScore,
+      marketingScore: layer2.marketingScore,
+    };
+  }
+
+  // Ambiguous with ANY customer signal (score >= 1) — default to respond.
+  // Real customers from Gmail/Outlook/Yahoo have zero marketing headers,
+  // so they land here. Better to reply to one extra marketing email than
+  // miss a real customer. Only skip if truly zero customer signals AND
+  // high marketing indicators.
+  if (layer2.customerScore >= 1) {
+    return {
+      shouldRespond: true,
+      layer: 2,
+      reason: 'backlog_ambiguous_has_customer_signal',
+      confidence: 0.7,
+      gptUsed: false,
+      customerScore: layer2.customerScore,
+      marketingScore: layer2.marketingScore,
+    };
+  }
+
+  // Truly zero customer signals — check if it looks like a personal email
+  // (no marketing headers, no ESP domain, no list-unsubscribe). Personal
+  // emails from customers who didn't mention order numbers still deserve a reply.
+  const senderLower = (normalized.senderEmail || '').toLowerCase();
+  const isPersonalDomain = /(@gmail\.|@yahoo\.|@hotmail\.|@outlook\.|@icloud\.|@aol\.|@live\.|@proton)/i.test(senderLower);
+  const hasMarketingHeaders = isBulkMarketingHeader(headers) || isAutomatedHeader(headers);
+
+  if (isPersonalDomain && !hasMarketingHeaders && layer2.marketingScore < MARKETING_SCORE_SKIP) {
+    return {
+      shouldRespond: true,
+      layer: 2,
+      reason: 'backlog_personal_email_benefit_of_doubt',
+      confidence: 0.65,
       gptUsed: false,
       customerScore: layer2.customerScore,
       marketingScore: layer2.marketingScore,

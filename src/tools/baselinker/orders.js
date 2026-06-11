@@ -50,7 +50,7 @@ export async function resolveOrderReference(order_id) {
   }
 
   const data = await baselinkerRequest('getOrders', {
-    filter_external_order_id: reference,
+    search_string: reference,
     get_unconfirmed_orders: false,
   });
 

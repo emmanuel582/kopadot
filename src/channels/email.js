@@ -252,7 +252,7 @@ function emailNeedsHumanFollowUp(agentResult, escalationCheck) {
 
 function stripHtml(html) {
   if (!html) return '';
-  return html
+  let text = html
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<br\s*\/?>/gi, '\n')
@@ -262,9 +262,20 @@ function stripHtml(html) {
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+    .replace(/&quot;/g, '"');
+    
+  // Strip quoted replies (standard email quoting)
+  const lines = text.split('\n');
+  const cleanLines = [];
+  for (const line of lines) {
+    if (line.trim().startsWith('>')) continue;
+    if (line.match(/^On .* wrote:/i)) break;
+    if (line.match(/^_{10,}/)) break; // Outlook separator
+    if (line.match(/^-{10,}/)) break; // Outlook separator
+    if (line.match(/^From: /i)) break;
+    cleanLines.push(line);
+  }
+  return cleanLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function trackProcessedMessage(messageId) {
@@ -553,7 +564,7 @@ async function markConversationAsRead(client, conversationId) {
 
 async function sendEmailReply(client, messageId, htmlContent) {
   await client
-    .api(`/users/${env.msGraphUserId}/messages/${messageId}/reply`)
+    .api(`/users/${env.msGraphUserId}/messages/${messageId}/replyAll`)
     .post({
       message: {
         body: {

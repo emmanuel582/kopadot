@@ -107,6 +107,8 @@ if (!env.emailPollingEnabled) {
   });
 }
 
+import { startKeepAlive } from './keepAlive.js';
+
 server.listen(env.port, () => {
   logger.info(`
 ╔══════════════════════════════════════════════════════════╗
@@ -127,6 +129,11 @@ server.listen(env.port, () => {
 ╚══════════════════════════════════════════════════════════╝
   `);
 });
+
+// Start Keep-Alive to prevent Render free tier from sleeping
+if (process.env.RENDER_EXTERNAL_URL) {
+  startKeepAlive(`${process.env.RENDER_EXTERNAL_URL}/health`, 10);
+}
 
 // ── Graceful Shutdown ───────────────────────────────────────────────
 function shutdown(signal) {

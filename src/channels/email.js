@@ -563,16 +563,26 @@ async function markConversationAsRead(client, conversationId) {
 }
 
 async function sendEmailReply(client, messageId, htmlContent) {
+  const message = {
+    body: {
+      contentType: 'HTML',
+      content: htmlContent,
+    },
+  };
+
+  if (env.zendeskSubdomain) {
+    message.bccRecipients = [
+      {
+        emailAddress: {
+          address: `support@${env.zendeskSubdomain}.zendesk.com`
+        }
+      }
+    ];
+  }
+
   await client
     .api(`/users/${env.msGraphUserId}/messages/${messageId}/replyAll`)
-    .post({
-      message: {
-        body: {
-          contentType: 'HTML',
-          content: htmlContent,
-        },
-      },
-    });
+    .post({ message });
 }
 
 /**

@@ -271,7 +271,7 @@ async function sendZendeskReply(conversationId, text) {
     const response = await axios.post(
       url,
       {
-        author: { type: 'business' },
+        author: { type: 'bot' },
         content: {
           type: 'text',
           text: text,
@@ -310,7 +310,7 @@ async function sendZendeskReply(conversationId, text) {
         await axios.post(
           url,
           {
-            author: { type: 'business' },
+            author: { type: 'bot' },
             content: { type: 'text', text },
           },
           {

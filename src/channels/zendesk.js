@@ -1,6 +1,8 @@
 import express from 'express';
 import crypto from 'crypto';
 import axios from 'axios';
+import fs from 'fs';
+import path from 'path';
 import logger from '../middleware/logger.js';
 import { processMessage } from '../agent/chatgptEngine.js';
 import {
@@ -36,7 +38,34 @@ import env from '../config/env.js';
 const router = express.Router();
 
 // ── Session mapping: Zendesk conversation ID → internal session ID ──
-const conversationSessionMap = new Map();
+// Persisted to disk so Zendesk chat context survives cloud restarts.
+const ZD_MAP_DIR = path.join(process.cwd(), '.data');
+const ZD_MAP_FILE = path.join(ZD_MAP_DIR, 'zendesk-sessions.json');
+
+if (!fs.existsSync(ZD_MAP_DIR)) {
+  fs.mkdirSync(ZD_MAP_DIR, { recursive: true });
+}
+
+let conversationSessionMap = new Map();
+
+// Load from disk on startup
+try {
+  if (fs.existsSync(ZD_MAP_FILE)) {
+    const data = fs.readFileSync(ZD_MAP_FILE, 'utf8');
+    conversationSessionMap = new Map(JSON.parse(data));
+    logger.info(`Loaded ${conversationSessionMap.size} persistent Zendesk session mappings from disk.`);
+  }
+} catch (error) {
+  logger.error(`Failed to load Zendesk session mappings: ${error.message}`);
+}
+
+function saveZendeskSessionMap() {
+  try {
+    fs.writeFileSync(ZD_MAP_FILE, JSON.stringify([...conversationSessionMap.entries()]), 'utf8');
+  } catch (error) {
+    logger.error(`Failed to save Zendesk session mappings: ${error.message}`);
+  }
+}
 
 /**
  * GET /zendesk/webhooks — Verification endpoint.
@@ -162,6 +191,7 @@ async function handleConversationMessage(event, fullPayload) {
     const session = getSession(null, { channel: CHANNELS.LIVE_CHAT });
     sessionId = session.id;
     conversationSessionMap.set(conversationId, sessionId);
+    saveZendeskSessionMap();
     logger.info(`New Zendesk session created: ${sessionId} → conversation ${conversationId}`);
   }
 

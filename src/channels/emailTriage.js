@@ -23,6 +23,13 @@ const AUTOMATED_SENDER_PATTERNS = [
   /vendor@/i,
   /@sell\.amazon/i,
   /@agl\.amazon\.com/i,
+  /payments?@/i,
+  /billing@/i,
+  /tracking@/i,
+  /tracking-reply@/i,
+  /shipment id:/i,
+  /account linking/i,
+  /new information required/i,
 ];
 
 const INTERNAL_NOTIFICATION_PATTERNS = [
@@ -51,6 +58,18 @@ const PLATFORM_SENDER_DOMAINS = [
   '@mirakl.net',
   '@notification.mirakl',
   '@shipping.temuemail',
+  '@paypal.com',
+  '@stripe.com',
+  '@klarna.com',
+  '@clearpay.co.uk',
+  '@dpd.co.uk',
+  '@royalmail.com',
+  '@evri.com',
+  '@myhermes.co.uk',
+  '@ups.com',
+  '@fedex.com',
+  '@dhl.com',
+  '@shop.tiktok.com',
 ];
 
 const SECURITY_NOTIFICATION_SUBJECT_PATTERNS = [
@@ -431,7 +450,10 @@ async function runLayer3GptClassify(input, scores) {
 Reply YES only if a person needs help from the store: orders, delivery, refunds, returns, product issues, payments, account help.
 Reply NO for: marketing, newsletters, marketplace seller alerts, supplier/WTS offers, platform notifications, spam, auto-replies, vendor outreach, B2B distributors, pricelists, security/account emails from third-party platforms (Roblox, Temu, etc.).
 
-When unsure, reply YES — never miss a real customer.
+CRITICAL INSTRUCTIONS:
+Automated shipment updates, shipment IDs, vendor account warnings, platform seller linking requests, and courier support replies (from DHL, DPD, TikTok, Amazon, etc.) are NOT customer support queries and MUST NOT receive a response.
+
+When unsure between a real person needing help and marketing, reply YES — never miss a real customer.
 
 JSON only: {"needs_response":true/false,"confidence":0.0-1.0,"reason":"brief"}`,
         },
@@ -442,7 +464,7 @@ JSON only: {"needs_response":true/false,"confidence":0.0-1.0,"reason":"brief"}`,
             `Subject: ${input.subject || '(no subject)'}`,
             `Preview: ${preview}`,
             `Heuristic hints: customer=${scores.customerScore}, marketing=${scores.marketingScore}`,
-            `CRITICAL RULE: If the email is from a marketplace like Temu, Amazon, eBay, or is a vendor/seller alert, you MUST output needs_response: false.`,
+            `CRITICAL RULE: If the email is from a marketplace like Temu, Amazon, eBay, TikTok, or is a vendor/seller alert, or a courier like DHL, you MUST output needs_response: false.`,
           ].join('\n'),
         },
       ],

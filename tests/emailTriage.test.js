@@ -50,6 +50,31 @@ describe('emailTriage Layer 1 — hard deny (zero GPT cost)', () => {
     assert.equal(result.gptUsed, false);
     assert.equal(result.reason, 'platform_notification_sender');
   });
+  it('skips DHL shipment ID notifications', async () => {
+    const result = await triageInboundEmail({
+      senderEmail: 'gb.deliveryinfo@dhl.com',
+      subject: 'Shipment ID: 5565843555 - New Information Required',
+      bodyPreview: 'Please provide more details for your DHL shipment.',
+    }, { ownMailbox: OWN });
+
+    assert.equal(result.shouldRespond, false);
+    assert.equal(result.layer, 1);
+    assert.equal(result.gptUsed, false);
+    assert.equal(result.reason, 'platform_notification_sender');
+  });
+
+  it('skips TikTok seller linking requirements', async () => {
+    const result = await triageInboundEmail({
+      senderEmail: 'uksellersupport@shop.tiktok.com',
+      subject: 'Important Update: Official Account Linking Requirements',
+      bodyPreview: 'Link your TikTok shop account.',
+    }, { ownMailbox: OWN });
+
+    assert.equal(result.shouldRespond, false);
+    assert.equal(result.layer, 1);
+    assert.equal(result.gptUsed, false);
+    assert.equal(result.reason, 'platform_notification_sender');
+  });
 });
 
 describe('emailTriage Layer 2 — signal scoring (zero GPT cost)', () => {
@@ -68,7 +93,7 @@ describe('emailTriage Layer 2 — signal scoring (zero GPT cost)', () => {
 
   it('replies to customer from a company domain', async () => {
     const result = await triageInboundEmail({
-      senderEmail: 'billing@acmecorp.com',
+      senderEmail: 'purchasing@acmecorp.com',
       subject: 'Refund request for order #88291',
       bodyPreview: 'Hello, we need a refund for order #88291 — the item arrived damaged. Please advise.',
     }, { ownMailbox: OWN });
@@ -192,7 +217,7 @@ describe('emailTriage — customer safety (must never block real queries)', () =
 describe('emailTriage fast backlog drain', () => {
   it('marks ambiguous backlog as skip without GPT', () => {
     const result = triageInboundEmailFast({
-      senderEmail: 'vendor@supplier.com',
+      senderEmail: 'sales@supplier.com',
       subject: 'Newsletter June',
       bodyPreview: 'Check out our latest deals.',
     }, { ownMailbox: OWN });

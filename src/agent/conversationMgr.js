@@ -1,4 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
+import fs from 'fs';
+import path from 'path';
 import env from '../config/env.js';
 import logger from '../middleware/logger.js';
 
@@ -15,7 +17,36 @@ import logger from '../middleware/logger.js';
  */
 
 // ── Session Store ───────────────────────────────────────────────────
-const sessions = new Map();
+const DATA_DIR = path.join(process.cwd(), '.data');
+const DATA_FILE = path.join(DATA_DIR, 'sessions.json');
+
+// Ensure data directory exists
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+let sessions = new Map();
+
+// Load sessions from disk on startup
+try {
+  if (fs.existsSync(DATA_FILE)) {
+    const data = fs.readFileSync(DATA_FILE, 'utf8');
+    const parsed = JSON.parse(data);
+    sessions = new Map(parsed);
+    logger.info(`Loaded ${sessions.size} persistent sessions from disk.`);
+  }
+} catch (error) {
+  logger.error(`Failed to load persistent sessions: ${error.message}`);
+}
+
+function saveSessions() {
+  try {
+    const data = JSON.stringify([...sessions.entries()]);
+    fs.writeFileSync(DATA_FILE, data, 'utf8');
+  } catch (error) {
+    logger.error(`Failed to save sessions to disk: ${error.message}`);
+  }
+}
 
 const SESSION_TTL_MS = env.sessionTtlMinutes * 60 * 1000;
 const MAX_HISTORY = env.maxConversationHistory;
@@ -31,6 +62,7 @@ setInterval(() => {
     }
   }
   if (cleaned > 0) {
+    saveSessions();
     logger.debug(`Cleaned up ${cleaned} expired session(s). Active: ${sessions.size}`);
   }
 }, 5 * 60 * 1000);
@@ -74,6 +106,7 @@ export function getSession(sessionId, options = {}) {
   };
 
   sessions.set(id, session);
+  saveSessions();
   logger.info(`New session created: ${id}`, { channel: session.channel });
 
   return session;
@@ -100,6 +133,8 @@ export function addToHistory(sessionId, newEntries) {
     session.conversationHistory = session.conversationHistory.slice(excess);
     logger.debug(`Trimmed conversation history for session ${sessionId}, removed ${excess} entries`);
   }
+  
+  saveSessions();
 }
 
 /**
@@ -134,6 +169,7 @@ export function updateCustomerIdentity(sessionId, identity) {
   logger.debug(`Customer identity updated for session ${sessionId}`, {
     verified: session.customerIdentity.verified,
   });
+  saveSessions();
 }
 
 /**
@@ -144,6 +180,7 @@ export function updateCustomerIdentity(sessionId, identity) {
 export function recordToolUsage(sessionId, count) {
   const session = getSession(sessionId);
   session.metadata.toolCallsTotal += count;
+  saveSessions();
 }
 
 /**
@@ -153,6 +190,7 @@ export function recordToolUsage(sessionId, count) {
 export function markEscalated(sessionId) {
   const session = getSession(sessionId);
   session.metadata.escalated = true;
+  saveSessions();
   logger.info(`Session ${sessionId} marked as escalated`);
 }
 
@@ -185,7 +223,10 @@ export function getSessionSummary(sessionId) {
  */
 export function destroySession(sessionId) {
   const had = sessions.delete(sessionId);
-  if (had) logger.info(`Session destroyed: ${sessionId}`);
+  if (had) {
+    saveSessions();
+    logger.info(`Session destroyed: ${sessionId}`);
+  }
   return had;
 }
 

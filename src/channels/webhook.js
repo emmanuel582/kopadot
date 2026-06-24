@@ -113,6 +113,8 @@ router.post('/chat', async (req, res) => {
         tools_used: result.toolsUsed.map(t => t.name),
         tools_used_details: result.toolsUsed,
         model: result.metadata.model,
+        escalated: result.metadata.escalated || false,
+        paused: result.metadata.paused || false,
       },
     });
 

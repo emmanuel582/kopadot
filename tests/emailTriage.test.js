@@ -75,6 +75,32 @@ describe('emailTriage Layer 1 — hard deny (zero GPT cost)', () => {
     assert.equal(result.gptUsed, false);
     assert.equal(result.reason, 'platform_notification_sender');
   });
+
+  it('skips clearance notifications', async () => {
+    const result = await triageInboundEmail({
+      senderEmail: 'marketing@supplier.com',
+      subject: 'CLEARANCE NOTIFICATION: 50% off all watches',
+      bodyPreview: 'Get them while they last!',
+    }, { ownMailbox: OWN });
+
+    assert.equal(result.shouldRespond, false);
+    assert.equal(result.layer, 1);
+    assert.equal(result.gptUsed, false);
+    assert.equal(result.reason, 'automated_sender_address');
+  });
+
+  it('skips operator alerts', async () => {
+    const result = await triageInboundEmail({
+      senderEmail: 'system@zendesk.com',
+      subject: 'Message from Operator',
+      bodyPreview: 'You have a new message from the operator in chat.',
+    }, { ownMailbox: OWN });
+
+    assert.equal(result.shouldRespond, false);
+    assert.equal(result.layer, 1);
+    assert.equal(result.gptUsed, false);
+    assert.equal(result.reason, 'platform_notification_sender');
+  });
 });
 
 describe('emailTriage Layer 2 — signal scoring (zero GPT cost)', () => {
@@ -211,6 +237,17 @@ describe('emailTriage — customer safety (must never block real queries)', () =
 
     assert.equal(result.shouldRespond, true);
     assert.ok(result.customerScore >= 3);
+  });
+
+  it('allows CS-forwarded Debenhams customer questions via GPT exception', async () => {
+    const result = await triageInboundEmail({
+      senderEmail: 'customerservices@debenhams.com',
+      subject: 'FW: Customer question regarding order',
+      bodyPreview: 'newsletter: Please see the below customer question: "Hi, I received my phone but it won\'t turn on. Can I return it?"',
+    }, { ownMailbox: OWN });
+
+    assert.equal(result.shouldRespond, true);
+    assert.equal(result.gptUsed, false);
   });
 });
 

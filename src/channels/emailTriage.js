@@ -36,6 +36,8 @@ const INTERNAL_NOTIFICATION_PATTERNS = [
   /^\[KopaDot\]/i,
   /ticket\s*\(#\d+\)\s*by/i,
   /has been received\.\s*It is unassigned/i,
+  /clearance notification/i,
+  /\boperator(s)?\b/i,
 ];
 
 const PLATFORM_SENDER_DOMAINS = [
@@ -167,6 +169,7 @@ const MARKETING_SUBJECT_PATTERNS = [
   /exclusive deal/i,
   /book a (demo|call)/i,
   /schedule a (demo|call)/i,
+  /clearance/i,
 ];
 
 const PROMOTIONAL_BODY_PATTERNS = [
@@ -451,9 +454,9 @@ Reply YES only if a person needs help from the store: orders, delivery, refunds,
 Reply NO for: marketing, newsletters, marketplace seller alerts, supplier/WTS offers, platform notifications, spam, auto-replies, vendor outreach, B2B distributors, pricelists, security/account emails from third-party platforms (Roblox, Temu, etc.).
 
 CRITICAL INSTRUCTIONS:
-Automated shipment updates, shipment IDs, vendor account warnings, platform seller linking requests, and courier support replies (from DHL, DPD, TikTok, Amazon, etc.) are NOT customer support queries and MUST NOT receive a response.
-
-When unsure between a real person needing help and marketing, reply YES — never miss a real customer.
+- Automated shipment updates, shipment IDs, vendor account warnings, platform seller linking requests, clearance notifications, operator alerts, and courier support replies (from DHL, DPD, TikTok, Amazon, etc.) are NOT customer support queries and MUST NOT receive a response. Reply NO.
+- We DO respond to questions from eBay or Debenhams if they are forwarded by Customer Service (e.g. customerservices@debenhams.com) AND they contain a real customer question inside. Reply YES for these.
+- If it looks like a random marketing or B2B outreach email, definitively reply NO. We receive millions of spam emails, be extremely strict on spam/marketing.
 
 JSON only: {"needs_response":true/false,"confidence":0.0-1.0,"reason":"brief"}`,
         },
@@ -464,7 +467,8 @@ JSON only: {"needs_response":true/false,"confidence":0.0-1.0,"reason":"brief"}`,
             `Subject: ${input.subject || '(no subject)'}`,
             `Preview: ${preview}`,
             `Heuristic hints: customer=${scores.customerScore}, marketing=${scores.marketingScore}`,
-            `CRITICAL RULE: If the email is from a marketplace like Temu, Amazon, eBay, TikTok, or is a vendor/seller alert, or a courier like DHL, you MUST output needs_response: false.`,
+            `CRITICAL RULE: If the email is from a marketplace like Temu, Amazon, TikTok, or is a vendor/seller alert, or a courier like DHL, output needs_response: false.`,
+            `EXCEPTION: If it is a real customer question forwarded by Debenhams or eBay CS, output needs_response: true.`
           ].join('\n'),
         },
       ],

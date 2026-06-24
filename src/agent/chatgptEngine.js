@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import env from '../config/env.js';
 import { CHANNELS } from '../config/constants.js';
 import logger from '../middleware/logger.js';
+import { getSession, addToHistory, getHistory, recordToolUsage, updateCustomerIdentity, isSessionPaused } from './conversationMgr.js';
 import { getToolDeclarations, executeToolCall } from './toolRegistry.js';
 
 /**
@@ -416,6 +417,16 @@ export async function processMessage(message, conversationHistory = [], sessionC
   const toolsUsed = [];
   let toolCallCount = 0;
 
+  if (sessionContext?.sessionId && isSessionPaused(sessionContext.sessionId)) {
+    logger.info(`Session ${sessionContext.sessionId} is paused. AI skipping message.`);
+    return {
+      response: '',
+      toolsUsed: [],
+      conversationUpdate: [],
+      metadata: { paused: true, needsHumanFollowUp: false, processingTimeMs: 0 }
+    };
+  }
+
   try {
     // 1. Guardrail Input Scanning Firewall
     const guardrail = await checkGuardrails(message);
@@ -574,6 +585,7 @@ export async function processMessage(message, conversationHistory = [], sessionC
         synthesized: finalized.synthesized,
         qualityRetries: finalized.qualityRetries,
         inadequateReply: finalized.inadequateReply,
+        escalated: needsHumanFollowUp,
       },
     };
   } catch (error) {

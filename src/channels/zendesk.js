@@ -11,6 +11,7 @@ import {
   getHistory,
   recordToolUsage,
   updateCustomerIdentity,
+  pauseSession,
 } from '../agent/conversationMgr.js';
 import { shouldAutoEscalate } from '../agent/escalation.js';
 import { CHANNELS } from '../config/constants.js';
@@ -146,17 +147,42 @@ async function handleConversationMessage(event, fullPayload) {
   const conversation = payload.conversation || {};
   const conversationId = conversation.id || conversation._id;
 
-  // Skip messages from the business (our own replies) to avoid loops
-  const authorType = message.author?.type || message.role;
-  if (authorType === 'business' || authorType === 'app') {
-    logger.debug('Skipping business/app message (our own reply)');
-    return;
-  }
-
   // Extract message text
   const messageText = message.content?.text || message.text;
   if (!messageText || typeof messageText !== 'string' || messageText.trim().length === 0) {
     logger.debug('Skipping non-text or empty message from Zendesk');
+    return;
+  }
+
+  const authorType = message.author?.type || message.role;
+
+  // Agent unpause command
+  if (authorType === 'business' && messageText.trim().toLowerCase() === '/resume') {
+    let sessionId = conversationSessionMap.get(conversationId);
+    if (sessionId) {
+      logger.info(`Agent sent /resume command. Unpausing AI for session ${sessionId}.`);
+      pauseSession(sessionId, 0); // 0 hours = unpaused immediately
+    }
+    return;
+  }
+
+  // Agent pause command
+  if (authorType === 'business' && messageText.trim().toLowerCase() === '/pause') {
+    let sessionId = conversationSessionMap.get(conversationId);
+    if (sessionId) {
+      logger.info(`Agent sent /pause command. Pausing AI for session ${sessionId}.`);
+      pauseSession(sessionId, 24); // Pause for 24 hours
+    }
+    return;
+  }
+
+  // Skip other messages from the business (our own or agent replies) to avoid loops
+  if (authorType === 'business' || authorType === 'app') {
+    logger.debug('Business/app message detected (human or system reply). Pausing AI for this session.');
+    let sessionId = conversationSessionMap.get(conversationId);
+    if (sessionId) {
+      pauseSession(sessionId, 24); // Pause for 24 hours to let human take over
+    }
     return;
   }
 

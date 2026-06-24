@@ -52,7 +52,7 @@ const SESSION_TTL_MS = env.sessionTtlMinutes * 60 * 1000;
 const MAX_HISTORY = env.maxConversationHistory;
 
 // Clean up expired sessions every 5 minutes
-setInterval(() => {
+const cleanupInterval = setInterval(() => {
   const now = Date.now();
   let cleaned = 0;
   for (const [id, session] of sessions) {
@@ -66,6 +66,8 @@ setInterval(() => {
     logger.debug(`Cleaned up ${cleaned} expired session(s). Active: ${sessions.size}`);
   }
 }, 5 * 60 * 1000);
+
+cleanupInterval.unref();
 
 // ── Session Interface ───────────────────────────────────────────────
 
@@ -102,6 +104,7 @@ export function getSession(sessionId, options = {}) {
       messageCount: 0,
       toolCallsTotal: 0,
       escalated: false,
+      pausedUntil: 0,
     },
   };
 
@@ -231,6 +234,29 @@ export function destroySession(sessionId) {
 }
 
 /**
+ * Pause a session to stop AI from responding, typically when a human takes over.
+ * @param {string} sessionId - Session identifier.
+ * @param {number} hours - Number of hours to pause the session.
+ */
+export function pauseSession(sessionId, hours) {
+  const session = getSession(sessionId);
+  session.metadata.pausedUntil = Date.now() + hours * 60 * 60 * 1000;
+  saveSessions();
+  logger.info(`Session ${sessionId} paused for ${hours} hours`);
+}
+
+/**
+ * Check if a session is currently paused.
+ * @param {string} sessionId - Session identifier.
+ * @returns {boolean} True if the session is paused.
+ */
+export function isSessionPaused(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session || !session.metadata.pausedUntil) return false;
+  return Date.now() < session.metadata.pausedUntil;
+}
+
+/**
  * Get counts for monitoring.
  * @returns {object} Active session stats.
  */
@@ -251,5 +277,7 @@ export default {
   markEscalated,
   getSessionSummary,
   destroySession,
+  pauseSession,
+  isSessionPaused,
   getSessionStats,
 };

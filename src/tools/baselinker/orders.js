@@ -84,10 +84,26 @@ export async function lookupOrderById({ order_id }) {
       const data = await baselinkerRequest('getOrders', {
         order_id: resolved.internalOrderId,
       });
-      if (!data.orders?.length) {
+
+      if (!data.orders?.length && /^\d+$/.test(resolved.reference)) {
+        // Fallback for purely numeric external IDs (like Debenhams)
+        // If it wasn't a valid internal order ID, try searching it as a string
+        logger.info(`Numeric order_id ${resolved.internalOrderId} not found internally. Trying search_string...`);
+        const fallbackData = await baselinkerRequest('getOrders', {
+          search_string: resolved.reference,
+          get_unconfirmed_orders: false,
+        });
+        if (fallbackData.orders?.length) {
+          order = fallbackData.orders[0];
+          resolved.internalOrderId = order.order_id; // Correct the internal ID
+        }
+      } else if (data.orders?.length) {
+        order = data.orders[0];
+      }
+
+      if (!order) {
         return { found: false, message: `No order found with ID #${order_id}.` };
       }
-      order = data.orders[0];
     }
 
     const summary = await formatOrderSummary(order);
